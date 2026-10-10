@@ -295,6 +295,10 @@ export class TexelscopeApp extends LitElement {
 
   #onMessage = (event: MessageEvent) => {
     const data = event.data as { type?: string; capture?: Capture; pixel?: [number, number] } | undefined;
+    // An app that reloaded finds this tab again and asks whether it is listening.
+    if (data?.type === 'texelscope:hello') {
+      (event.source as Window | null)?.postMessage({ type: 'texelscope:ready' }, event.origin);
+    }
     if (data?.type === 'texelscope:capture' && data.capture) this.#receive(data.capture, data.pixel);
   };
 
