@@ -1,0 +1,15 @@
+[package]
+name = "texelscope-ir"
+description = "The WGSL front end for Texelscope, built on naga"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+naga = { workspace = true, features = ["wgsl-in"] }
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

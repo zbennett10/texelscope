@@ -1,0 +1,13 @@
+[package]
+name = "texelscope-explain"
+description = "Explanations of traced pixels for Texelscope"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+texelscope-interp.workspace = true
+texelscope-ir.workspace = true
+thiserror.workspace = true

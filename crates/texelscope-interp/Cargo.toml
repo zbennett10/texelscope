@@ -1,0 +1,13 @@
+[package]
+name = "texelscope-interp"
+description = "The Texelscope reference interpreter and trace format"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+texelscope-capture.workspace = true
+texelscope-ir.workspace = true
+thiserror.workspace = true

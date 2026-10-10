@@ -1,0 +1,17 @@
+[package]
+name = "texelscope-wasm"
+description = "Browser bindings for the Texelscope core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde_json.workspace = true
+texelscope-capture.workspace = true
+texelscope-ir.workspace = true
+texelscope-rewrite.workspace = true
+wasm-bindgen.workspace = true
