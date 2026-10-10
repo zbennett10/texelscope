@@ -1,8 +1,10 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "types": ["vite/client"],
-    "noEmit": true
+    "types": ["vite/client", "@webgpu/types"],
+    "noEmit": true,
+    "resolveJsonModule": true,
+    "paths": { "@texelscope/sdk": ["../sdk/src/index.ts"] }
   },
-  "include": ["src"]
+  "include": ["src", "test", "vite.config.ts"]
 }
