@@ -1,13 +1,17 @@
 //! The `texelscope` command.
 
+mod render;
+mod trace_text;
+
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use texelscope_capture::{Language, LoadedCapture, Resource};
-use texelscope_interp::Interpreter;
-use texelscope_ir::{ShaderModule, Stage};
+use texelscope_interp::{CaptureData, Interpreter};
+use texelscope_ir::{Override, ShaderModule, Stage};
 
 #[derive(Parser)]
 #[command(
@@ -40,12 +44,21 @@ enum Command {
     },
     /// Validate a capture file and summarize it.
     Capture { capture: PathBuf },
-    /// Trace one pixel of a capture and print every value as JSON.
+    /// Trace one pixel of a capture, showing each named value, decision and assignment.
     Trace {
         capture: PathBuf,
         /// The pixel as x,y.
         #[arg(long, value_parser = parse_pixel)]
         pixel: [u32; 2],
+        /// Show every expression, not only named values.
+        #[arg(long)]
+        all: bool,
+        /// Print the full trace as JSON.
+        #[arg(long)]
+        json: bool,
+        /// A JSON file with an array of overrides to apply.
+        #[arg(long)]
+        overrides: Option<PathBuf>,
     },
     /// Explain why one pixel of a capture has its color.
     Explain {
@@ -53,6 +66,22 @@ enum Command {
         /// The pixel as x,y.
         #[arg(long, value_parser = parse_pixel)]
         pixel: [u32; 2],
+        /// Print the explanation as JSON.
+        #[arg(long)]
+        json: bool,
+        /// A JSON file with an array of overrides to apply.
+        #[arg(long)]
+        overrides: Option<PathBuf>,
+    },
+    /// Shade every pixel of a capture on the CPU and write a PNG.
+    Render {
+        capture: PathBuf,
+        /// Where to write the image.
+        #[arg(short, long)]
+        output: PathBuf,
+        /// A JSON file with an array of overrides to apply.
+        #[arg(long)]
+        overrides: Option<PathBuf>,
     },
     /// Print the JSON Schema of the capture format.
     Schema,
@@ -69,8 +98,30 @@ fn main() -> Result<()> {
         Command::Check { shader, json } => check(&shader, json),
         Command::Emit { shader, to, entry } => emit(&shader, to, entry.as_deref()),
         Command::Capture { capture } => summarize(&capture),
-        Command::Trace { capture, pixel } => trace(&capture, pixel),
-        Command::Explain { capture, pixel } => explain(&capture, pixel),
+        Command::Trace {
+            capture,
+            pixel,
+            all,
+            json,
+            overrides,
+        } => trace(&capture, pixel, all, json, overrides.as_deref()),
+        Command::Explain {
+            capture,
+            pixel,
+            json,
+            overrides,
+        } => explain(&capture, pixel, json, overrides.as_deref()),
+        Command::Render {
+            capture,
+            output,
+            overrides,
+        } => {
+            let interp = interpreter(&capture)?;
+            let overrides = load_overrides(overrides.as_deref())?;
+            render::write_png(&interp, &overrides, &output)?;
+            println!("wrote {}", output.display());
+            Ok(())
+        }
         Command::Schema => {
             let schema = schemars::schema_for!(texelscope_capture::Capture);
             println!("{}", serde_json::to_string_pretty(&schema)?);
@@ -176,19 +227,50 @@ fn summarize(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn trace(path: &Path, pixel: [u32; 2]) -> Result<()> {
-    let (loaded, module) = load_capture(path)?;
-    let trace = Interpreter::new(&module, &loaded.capture).trace_pixel(pixel)?;
-    println!("{}", serde_json::to_string_pretty(&trace)?);
+fn trace(
+    path: &Path,
+    pixel: [u32; 2],
+    all: bool,
+    json: bool,
+    overrides: Option<&Path>,
+) -> Result<()> {
+    let interp = interpreter(path)?;
+    let trace = interp.trace_pixel(pixel, &load_overrides(overrides)?)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&trace)?);
+    } else {
+        print!("{}", trace_text::render(interp.module(), &trace, all));
+    }
     Ok(())
 }
 
-fn explain(path: &Path, pixel: [u32; 2]) -> Result<()> {
-    let (loaded, module) = load_capture(path)?;
-    let trace = Interpreter::new(&module, &loaded.capture).trace_pixel(pixel)?;
-    let explanation = texelscope_explain::explain(&module, &trace)?;
-    print!("{}", texelscope_explain::render_text(&explanation));
+fn explain(path: &Path, pixel: [u32; 2], json: bool, overrides: Option<&Path>) -> Result<()> {
+    let interp = interpreter(path)?;
+    let explanation =
+        texelscope_explain::explain_pixel(&interp, pixel, &load_overrides(overrides)?)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&explanation)?);
+    } else {
+        print!("{}", texelscope_explain::render_text(&explanation));
+    }
     Ok(())
+}
+
+/// Loads a capture and prepares an interpreter for it.
+fn interpreter(path: &Path) -> Result<Interpreter> {
+    let (loaded, module) = load_capture(path)?;
+    let data = CaptureData::new(loaded.capture, Some(&loaded.base_dir))?;
+    Ok(Interpreter::new(Arc::new(module), Arc::new(data))?)
+}
+
+fn load_overrides(path: Option<&Path>) -> Result<Vec<Override>> {
+    let Some(path) = path else {
+        return Ok(Vec::new());
+    };
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("could not read {}", path.display()))?;
+    serde_json::from_str(&text)
+        .with_context(|| format!("{} is not a JSON array of overrides", path.display()))
 }
 
 fn load_shader(path: &Path) -> Result<ShaderModule> {

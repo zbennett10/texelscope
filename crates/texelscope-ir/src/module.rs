@@ -75,6 +75,57 @@ pub struct NamedValue {
     pub at: Option<LineCol>,
 }
 
+/// A resource the shader declares with `@group` and `@binding`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceInfo {
+    pub group: u32,
+    pub binding: u32,
+    pub name: String,
+    pub kind: ResourceKind,
+}
+
+/// What a resource binding holds, in the terms of a WebGPU bind group layout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum ResourceKind {
+    Uniform,
+    Storage {
+        read_only: bool,
+    },
+    Texture {
+        /// A GPUTextureViewDimension such as `2d` or `2d-array`.
+        view_dimension: String,
+        /// `float`, `sint`, `uint` or `depth`.
+        sample_type: String,
+        multisampled: bool,
+    },
+    StorageTexture {
+        view_dimension: String,
+    },
+    Sampler {
+        comparison: bool,
+    },
+    Other,
+}
+
+/// A user-defined input of a fragment entry point.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StageInput {
+    pub location: u32,
+    /// The WGSL type, such as `vec2<f32>`.
+    pub ty: String,
+    /// `perspective`, `linear` or `flat`, when the shader says.
+    pub interpolation: Option<String>,
+    /// `center`, `centroid` or `sample`, when the shader says.
+    pub sampling: Option<String>,
+}
+
 /// A parsed and validated WGSL module, kept with its source.
 #[derive(Debug)]
 pub struct ShaderModule {
@@ -150,7 +201,8 @@ impl ShaderModule {
         let mut values = Vec::new();
         for (function, function_name, f) in self.functions() {
             for (&handle, name) in f.named_expressions.iter() {
-                let span = SourceSpan::from_naga(f.expressions.get_span(handle));
+                let span =
+                    SourceSpan::from_naga(f.expressions.get_span(handle)).map(|s| self.widen(s));
                 // naga names argument expressions too, so tell them apart from lets.
                 let kind = match f.expressions[handle] {
                     naga::Expression::FunctionArgument(_) => NamedValueKind::Argument,
@@ -191,7 +243,214 @@ impl ShaderModule {
     pub fn span_of(&self, expr: ExprRef) -> Option<SourceSpan> {
         let (_, f) = self.function(expr.function)?;
         let (handle, _) = f.expressions.iter().nth(expr.expr as usize)?;
-        SourceSpan::from_naga(f.expressions.get_span(handle))
+        SourceSpan::from_naga(f.expressions.get_span(handle)).map(|s| self.widen(s))
+    }
+
+    /// Extends a span that ends at a function name to cover the call's arguments, since naga
+    /// spans a builtin call by its name alone.
+    pub fn widen(&self, span: SourceSpan) -> SourceSpan {
+        let bytes = self.source.as_bytes();
+        let mut at = span.end as usize;
+        while bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
+            at += 1;
+        }
+        let named = self
+            .text(span)
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_');
+        if !named || bytes.get(at) != Some(&b'(') {
+            return span;
+        }
+        let mut depth = 0usize;
+        for (i, &b) in bytes.iter().enumerate().skip(at) {
+            match b {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return SourceSpan {
+                            start: span.start,
+                            end: i as u32 + 1,
+                        };
+                    }
+                }
+                _ => {}
+            }
+        }
+        span
+    }
+
+    /// The source text a span covers.
+    pub fn text(&self, span: SourceSpan) -> &str {
+        self.source
+            .get(span.start as usize..span.end as usize)
+            .unwrap_or("")
+    }
+
+    /// Every resource the module declares, ordered by group and binding.
+    pub fn resources(&self) -> Vec<ResourceInfo> {
+        let mut resources: Vec<ResourceInfo> = self
+            .module
+            .global_variables
+            .iter()
+            .filter_map(|(_, var)| {
+                let binding = var.binding.as_ref()?;
+                Some(ResourceInfo {
+                    group: binding.group,
+                    binding: binding.binding,
+                    name: var.name.clone().unwrap_or_default(),
+                    kind: self.resource_kind(var),
+                })
+            })
+            .collect();
+        resources.sort_by_key(|r| (r.group, r.binding));
+        resources
+    }
+
+    fn resource_kind(&self, var: &naga::GlobalVariable) -> ResourceKind {
+        use naga::{
+            AddressSpace, ImageClass, ImageDimension, ScalarKind, StorageAccess, TypeInner,
+        };
+        let view = |dim: ImageDimension, arrayed: bool| {
+            let base = match dim {
+                ImageDimension::D1 => "1d",
+                ImageDimension::D2 => "2d",
+                ImageDimension::D3 => "3d",
+                ImageDimension::Cube => "cube",
+            };
+            if arrayed {
+                format!("{base}-array")
+            } else {
+                base.to_string()
+            }
+        };
+        match (var.space, &self.module.types[var.ty].inner) {
+            (AddressSpace::Uniform, _) => ResourceKind::Uniform,
+            (AddressSpace::Storage { access }, _) => ResourceKind::Storage {
+                read_only: !access.contains(StorageAccess::STORE),
+            },
+            (
+                _,
+                TypeInner::Image {
+                    dim,
+                    arrayed,
+                    class,
+                },
+            ) => match *class {
+                ImageClass::Sampled { kind, multi } => ResourceKind::Texture {
+                    view_dimension: view(*dim, *arrayed),
+                    sample_type: match kind {
+                        ScalarKind::Sint => "sint",
+                        ScalarKind::Uint => "uint",
+                        _ => "float",
+                    }
+                    .to_string(),
+                    multisampled: multi,
+                },
+                ImageClass::Depth { multi } => ResourceKind::Texture {
+                    view_dimension: view(*dim, *arrayed),
+                    sample_type: "depth".to_string(),
+                    multisampled: multi,
+                },
+                ImageClass::Storage { .. } => ResourceKind::StorageTexture {
+                    view_dimension: view(*dim, *arrayed),
+                },
+                ImageClass::External => ResourceKind::Other,
+            },
+            (_, TypeInner::Sampler { comparison }) => ResourceKind::Sampler {
+                comparison: *comparison,
+            },
+            _ => ResourceKind::Other,
+        }
+    }
+
+    /// The function an expression belongs to and its handle there.
+    pub fn expression(
+        &self,
+        expr: ExprRef,
+    ) -> Option<(&naga::Function, naga::Handle<naga::Expression>)> {
+        let (_, f) = self.function(expr.function)?;
+        let (handle, _) = f.expressions.iter().nth(expr.expr as usize)?;
+        Some((f, handle))
+    }
+
+    /// The type naga inferred for an expression.
+    pub fn type_of(&self, expr: ExprRef) -> Option<&naga::TypeInner> {
+        let (_, handle) = self.expression(expr)?;
+        let info = match expr.function {
+            FunctionRef::EntryPoint(i) => self.info.get_entry_point(i as usize),
+            FunctionRef::Function(i) => {
+                let (h, _) = self.module.functions.iter().nth(i as usize)?;
+                &self.info[h]
+            }
+        };
+        Some(info[handle].ty.inner_with(&self.module.types))
+    }
+
+    /// The location inputs of a fragment entry point, for building a vertex stage that
+    /// feeds it.
+    pub fn stage_inputs(&self, entry_point: &str) -> Vec<StageInput> {
+        let Some(ep) = self
+            .module
+            .entry_points
+            .iter()
+            .find(|ep| ep.name == entry_point)
+        else {
+            return Vec::new();
+        };
+        let mut inputs = Vec::new();
+        let mut add = |binding: &Option<naga::Binding>, ty: naga::Handle<naga::Type>| {
+            if let Some(naga::Binding::Location {
+                location,
+                interpolation,
+                sampling,
+                ..
+            }) = binding
+            {
+                inputs.push(StageInput {
+                    location: *location,
+                    ty: self.wgsl_type(&self.module.types[ty].inner),
+                    interpolation: interpolation.map(|i| format!("{i:?}").to_lowercase()),
+                    sampling: sampling.map(|s| format!("{s:?}").to_lowercase()),
+                });
+            }
+        };
+        for arg in &ep.function.arguments {
+            match &self.module.types[arg.ty].inner {
+                naga::TypeInner::Struct { members, .. } if arg.binding.is_none() => {
+                    for m in members {
+                        add(&m.binding, m.ty);
+                    }
+                }
+                _ => add(&arg.binding, arg.ty),
+            }
+        }
+        inputs.sort_by_key(|i| i.location);
+        inputs
+    }
+
+    /// The WGSL spelling of a scalar, vector or matrix type.
+    pub fn wgsl_type(&self, inner: &naga::TypeInner) -> String {
+        let scalar = |s: naga::Scalar| match (s.kind, s.width) {
+            (naga::ScalarKind::Bool, _) => "bool".to_string(),
+            (naga::ScalarKind::Sint, w) => format!("i{}", u32::from(w) * 8),
+            (naga::ScalarKind::Uint, w) => format!("u{}", u32::from(w) * 8),
+            (_, w) => format!("f{}", u32::from(w) * 8),
+        };
+        match *inner {
+            naga::TypeInner::Scalar(s) => scalar(s),
+            naga::TypeInner::Vector { size, scalar: s } => {
+                format!("vec{}<{}>", size as u8, scalar(s))
+            }
+            naga::TypeInner::Matrix {
+                columns,
+                rows,
+                scalar: s,
+            } => {
+                format!("mat{}x{}<{}>", columns as u8, rows as u8, scalar(s))
+            }
+            ref other => format!("{other:?}"),
+        }
     }
 
     /// The 1-based line and column of a byte offset.

@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 serde.workspace = true
+serde_json.workspace = true
 texelscope-capture.workspace = true
 texelscope-ir.workspace = true
 thiserror.workspace = true

@@ -6,8 +6,9 @@ mod patch;
 mod probe;
 
 pub use emit::{emit_glsl_es, emit_wgsl};
-pub use patch::{Override, Patch, apply};
+pub use patch::{Patch, apply, patch_source};
 pub use probe::{Instrumented, ProbeSet, ProbeSlot, ProbeTarget, instrument};
+pub use texelscope_ir::Override;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RewriteError {

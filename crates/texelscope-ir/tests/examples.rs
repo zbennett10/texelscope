@@ -76,3 +76,13 @@ fn arguments_are_not_lets() {
             .all(|(_, kind)| *kind == NamedValueKind::Let)
     );
 }
+
+#[test]
+fn resources_serialize_as_the_browser_reads_them() {
+    let module = example("scalar-field/field.wgsl");
+    let json = serde_json::to_value(module.resources()).unwrap();
+    assert_eq!(
+        json[1]["kind"],
+        serde_json::json!({ "kind": "texture", "viewDimension": "2d", "sampleType": "float", "multisampled": false })
+    );
+}

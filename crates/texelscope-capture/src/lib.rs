@@ -1,11 +1,15 @@
 //! Capture files hold everything Texelscope needs to replay one fragment workload.
 //! docs/capture-format.md describes the JSON.
 
+mod data;
 mod model;
 mod validate;
 
 use std::path::{Path, PathBuf};
 
+pub use data::{
+    DecodedLevel, DecodedTexture, decode_base64, encode_base64, f32_to_half, half_to_f32,
+};
 pub use model::*;
 pub use validate::validate;
 
@@ -21,6 +25,8 @@ pub enum CaptureError {
     Json(#[from] serde_json::Error),
     #[error("capture is invalid:\n  {}", .0.join("\n  "))]
     Invalid(Vec<String>),
+    #[error("{0}")]
+    Data(String),
 }
 
 /// A capture read from disk, with its shader source resolved.

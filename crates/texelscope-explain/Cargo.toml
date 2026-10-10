@@ -7,6 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+texelscope-capture.workspace = true
 serde.workspace = true
 texelscope-interp.workspace = true
 texelscope-ir.workspace = true

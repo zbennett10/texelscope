@@ -3,10 +3,15 @@
 
 mod ids;
 mod module;
+mod overrides;
 mod value;
 
 pub use ids::{ExprRef, FunctionRef, LineCol, SourceSpan};
-pub use module::{EntryPointInfo, IrError, NamedValue, NamedValueKind, ShaderModule, Stage};
+pub use module::{
+    EntryPointInfo, IrError, NamedValue, NamedValueKind, ResourceInfo, ResourceKind, ShaderModule,
+    Stage, StageInput,
+};
+pub use overrides::Override;
 pub use value::Value;
 
 /// The naga every Texelscope crate builds against.
