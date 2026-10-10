@@ -1,0 +1,7 @@
+/target/
+node_modules/
+dist/
+/crates/texelscope-wasm/pkg/
+/packages/ui/wasm/
+.DS_Store
+*.log

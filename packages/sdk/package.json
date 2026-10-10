@@ -1,0 +1,26 @@
+{
+  "name": "@texelscope/sdk",
+  "version": "0.0.0",
+  "private": true,
+  "description": "In-page hooks that capture WebGPU and WebGL2 draws for Texelscope",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./webgpu": { "types": "./dist/webgpu/index.d.ts", "default": "./dist/webgpu/index.js" },
+    "./webgl2": { "types": "./dist/webgl2/index.d.ts", "default": "./dist/webgl2/index.js" }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run --passWithNoTests",
+    "demo": "vite demo"
+  },
+  "devDependencies": {
+    "@webgpu/types": "^0.1.74",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4",
+    "vitest": "^5.0.3"
+  }
+}
