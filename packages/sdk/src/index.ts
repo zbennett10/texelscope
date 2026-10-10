@@ -3,3 +3,6 @@ export { installWebGPU } from './webgpu/index.js';
 export type { WebGPUInstallOptions, WebGPUSession } from './webgpu/index.js';
 export { installWebGL2 } from './webgl2/index.js';
 export type { WebGL2InstallOptions, WebGL2Session } from './webgl2/index.js';
+export { DEFAULT_UI_URL, downloadCapture, openInTexelscope } from './send.js';
+export type { OpenOptions } from './send.js';
+export { fromBase64, toBase64 } from './encode.js';

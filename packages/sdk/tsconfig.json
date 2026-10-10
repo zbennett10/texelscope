@@ -4,5 +4,5 @@
     "types": ["@webgpu/types"],
     "noEmit": true
   },
-  "include": ["src", "test", "demo"]
+  "include": ["src", "test"]
 }
