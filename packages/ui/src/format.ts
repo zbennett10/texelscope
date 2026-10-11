@@ -12,6 +12,25 @@ export function fixed(value: number, digits = 4): string {
   return text === '-0' ? '0' : text;
 }
 
+/** Where each line of a text starts, for finding the line of an offset. */
+export function lineStarts(text: string): number[] {
+  const starts = [0];
+  for (let i = text.indexOf('\n'); i !== -1; i = text.indexOf('\n', i + 1)) starts.push(i + 1);
+  return starts;
+}
+
+/** The line, counted from 1, that holds an offset. */
+export function lineAt(starts: number[], offset: number): number {
+  let lo = 0;
+  let hi = starts.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (starts[mid]! <= offset) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
 /** A value spelled roughly as WGSL would. */
 export function formatValue(value: Value): string {
   if ('f32' in value) return fixed(num(value.f32));

@@ -1,7 +1,8 @@
 import { LitElement, css, html } from 'lit';
-import { EditorState, RangeSetBuilder, StateEffect, StateField } from '@codemirror/state';
+import { Compartment, EditorState, RangeSetBuilder, StateEffect, StateField } from '@codemirror/state';
 import { Decoration, EditorView, WidgetType, type DecorationSet } from '@codemirror/view';
 import { basicSetup } from 'codemirror';
+import { glsl } from '../glsl-language.js';
 import { wgsl } from '../wgsl-language.js';
 import type { SourceSpan } from '../types.js';
 
@@ -26,7 +27,7 @@ class ValueWidget extends WidgetType {
   }
 }
 
-const setMarks = StateEffect.define<{ highlight: SourceSpan | null; values: InlineValue[] }>();
+const setMarks = StateEffect.define<{ highlight: SourceSpan | null; values: InlineValue[]; notRun: number[] }>();
 
 const marks = StateField.define<DecorationSet>({
   create: () => Decoration.none,
@@ -36,7 +37,12 @@ const marks = StateField.define<DecorationSet>({
       if (!effect.is(setMarks)) continue;
       const doc = tr.state.doc;
       const ranges: { from: number; to: number; deco: Decoration }[] = [];
-      const { highlight, values } = effect.value;
+      const { highlight, values, notRun } = effect.value;
+      for (const n of notRun) {
+        if (n < 1 || n > doc.lines) continue;
+        const from = doc.line(n).from;
+        ranges.push({ from, to: from, deco: Decoration.line({ class: 'ts-not-run' }) });
+      }
       if (highlight && highlight.end <= doc.length && highlight.start < highlight.end) {
         ranges.push({ from: highlight.start, to: highlight.end, deco: Decoration.mark({ class: 'ts-highlight' }) });
         const line = doc.lineAt(highlight.start);
@@ -63,6 +69,8 @@ export class TexelscopeSourceView extends LitElement {
     source: { type: String },
     highlight: { attribute: false },
     values: { attribute: false },
+    notRun: { attribute: false },
+    language: { type: String },
     error: { type: String },
   };
 
@@ -91,6 +99,9 @@ export class TexelscopeSourceView extends LitElement {
     .ts-line {
       background: rgba(219, 39, 119, 0.05);
     }
+    .ts-not-run {
+      opacity: 0.4;
+    }
     .ts-inline {
       margin-left: 1.5em;
       padding: 0 6px;
@@ -115,7 +126,12 @@ export class TexelscopeSourceView extends LitElement {
   declare source: string;
   declare highlight: SourceSpan | null;
   declare values: InlineValue[];
+  /** Lines of code the selected pixel didn't run, counted from 1, shown dimmed. */
+  declare notRun: number[];
+  /** The source's language, for highlighting. */
+  declare language: 'wgsl' | 'glsl';
   declare error: string;
+  #highlighting = new Compartment();
 
   #view?: EditorView;
   #timer?: number;
@@ -127,6 +143,8 @@ export class TexelscopeSourceView extends LitElement {
     this.source = '';
     this.highlight = null;
     this.values = [];
+    this.notRun = [];
+    this.language = 'wgsl';
     this.error = '';
   }
 
@@ -151,7 +169,7 @@ export class TexelscopeSourceView extends LitElement {
           doc: this.source,
           extensions: [
             basicSetup,
-            wgsl,
+            this.#highlighting.of(this.language === 'glsl' ? glsl : wgsl),
             marks,
             EditorView.updateListener.of((update) => {
               if (update.docChanged && !this.#external) this.#changed(update.state.doc.toString());
@@ -159,13 +177,16 @@ export class TexelscopeSourceView extends LitElement {
           ],
         }),
       });
-    } else if (changed.has('source') && this.#view.state.doc.toString() !== this.source) {
+    } else if (changed.has('language')) {
+      this.#view.dispatch({ effects: this.#highlighting.reconfigure(this.language === 'glsl' ? glsl : wgsl) });
+    }
+    if (changed.has('source') && this.#view.state.doc.toString() !== this.source) {
       this.#external = true;
       this.#view.dispatch({ changes: { from: 0, to: this.#view.state.doc.length, insert: this.source } });
       this.#external = false;
     }
-    if (changed.has('highlight') || changed.has('values') || changed.has('source')) {
-      this.#view.dispatch({ effects: setMarks.of({ highlight: this.highlight, values: this.values }) });
+    if (changed.has('highlight') || changed.has('values') || changed.has('notRun') || changed.has('source')) {
+      this.#view.dispatch({ effects: setMarks.of({ highlight: this.highlight, values: this.values, notRun: this.notRun }) });
       if (changed.has('highlight') && this.highlight) {
         const at = Math.min(this.highlight.start, this.#view.state.doc.length);
         this.#view.dispatch({ effects: EditorView.scrollIntoView(at, { y: 'center' }) });

@@ -1,4 +1,4 @@
-import type { Description, Explanation, Override, Rect, RegionData, Trace } from '../types.js';
+import type { Comparison, Description, Explanation, ExprRef, Override, Rect, RegionData, Trace } from '../types.js';
 
 /** Talks to the core in its worker. Calls run one at a time, in order. */
 export class Engine {
@@ -35,6 +35,12 @@ export class Engine {
   }
   explain(x: number, y: number, overrides: Override[]) {
     return this.#call<Explanation>('explain', x, y, overrides);
+  }
+  probe(expr: ExprRef, overrides: Override[]) {
+    return this.#call<{ wgsl: string; components: number }>('probe', expr, overrides);
+  }
+  compare(a: [number, number], b: [number, number], overrides: Override[]) {
+    return this.#call<Comparison>('compare', a, b, overrides);
   }
   region(rect: Rect, overrides: Override[], scope: Rect | null) {
     return this.#call<RegionData>('region', rect, overrides, scope);

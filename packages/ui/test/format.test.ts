@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fixed, formatValue, numbers, parseLike } from '../src/format.js';
+import { fixed, formatValue, numbers, parseLike, lineAt, lineStarts } from '../src/format.js';
 
 describe('values', () => {
   it('spell like WGSL with short floats', () => {
@@ -19,5 +19,13 @@ describe('values', () => {
 
   it('flatten scalars and vectors to numbers', () => {
     expect(numbers({ vector: [{ bool: true }, { i32: 4 }] })).toEqual([1, 4]);
+  });
+});
+
+describe('lineAt', () => {
+  it('finds the line of an offset, counted from 1', () => {
+    const starts = lineStarts('ab\ncd\n\nef');
+    expect(starts).toEqual([0, 3, 6, 7]);
+    expect([0, 2, 3, 5, 6, 7, 8].map((o) => lineAt(starts, o))).toEqual([1, 1, 2, 2, 3, 4, 4]);
   });
 });

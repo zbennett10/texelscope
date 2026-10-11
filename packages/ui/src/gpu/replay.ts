@@ -1,7 +1,7 @@
 // Replays a capture on the GPU: the captured fragment shader, fed by a generated vertex
 // stage, drawn into a texture of the captured size and format.
 
-import type { Capture, Texture } from '@texelscope/sdk';
+import { fromBase64, type Capture, type Texture } from '@texelscope/sdk';
 import type { Engine } from '../engine/client.js';
 import type { Description } from '../types.js';
 
@@ -16,6 +16,9 @@ const TEXEL_BYTES: Record<string, number> = {
   rgba32float: 16,
 };
 const UNFILTERABLE = new Set(['r32float', 'rg32float', 'rgba32float']);
+
+/** What a probe writes, and its target starts at, where a pixel computes nothing. */
+const MISSING = -1e38;
 
 const BLIT = /* wgsl */ `
 @group(0) @binding(0) var image: texture_2d<f32>;
@@ -66,12 +69,19 @@ export class Replay {
     this.#resources.clear();
     this.#capture = capture;
     this.#target?.destroy();
+    // A WebGL capture brings the frame the app drew, which stands in for a replay.
+    const reference = capture.reference;
     this.#target = this.device.createTexture({
       label: 'texelscope target',
       size: [capture.target.width, capture.target.height],
-      format: capture.target.format,
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC | GPUTextureUsage.TEXTURE_BINDING,
+      format: reference ? 'rgba8unorm' : capture.target.format,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
+    if (reference) {
+      const { x, y, width, height } = reference.rect;
+      this.device.queue.writeTexture({ texture: this.#target, origin: { x, y } }, fromBase64(reference.rgba8), { bytesPerRow: width * 4 }, [width, height]);
+    }
+    if (capture.shader.language === 'glsl') return;
     for (const binding of capture.bindings ?? []) {
       const key = `${binding.group}:${binding.binding}`;
       const r = binding.resource;
@@ -109,27 +119,108 @@ export class Replay {
     const capture = this.#capture;
     const target = this.#target;
     if (!capture || !target) return 'no capture is loaded';
+    if (capture.shader.language === 'glsl') {
+      this.present();
+      return undefined;
+    }
     const device = this.device;
     device.pushErrorScope('validation');
-    const fragment = device.createShaderModule({ label: 'captured fragment shader', code: source });
+    const built = await this.#pipeline(source, description, capture.target.format, 'texelscope replay');
+    if (typeof built === 'string') {
+      await device.popErrorScope();
+      return built;
+    }
+    const encoder = device.createCommandEncoder();
+    this.#draw(encoder, built, target, [0, 0, 0, 0]);
+    device.queue.submit([encoder.finish()]);
+    const error = await device.popErrorScope();
+    if (error) return error.message;
+    this.present();
+    return undefined;
+  }
+
+  /**
+   * Draws a probed shader, which outputs one value instead of the color, and reads every
+   * pixel back as four floats. Pixels that never computed the value, or were discarded, hold
+   * NaN. The shader marks them with -1e38, since WGSL rejects a constant NaN.
+   * Returns an error message on failure.
+   */
+  async probe(source: string, description: Description): Promise<Float32Array | string> {
+    const capture = this.#capture;
+    if (!capture) return 'no capture is loaded';
+    if (capture.shader.language === 'glsl') {
+      return 'Showing a value over the whole image needs a WebGPU capture for now. Shift-drag a region to see it there.';
+    }
+    const { width, height } = capture.target;
+    const device = this.device;
+    device.pushErrorScope('validation');
+    const built = await this.#pipeline(source, description, 'rgba32float', 'texelscope probe');
+    if (typeof built === 'string') {
+      await device.popErrorScope();
+      return built;
+    }
+    const target = device.createTexture({
+      label: 'texelscope probe',
+      size: [width, height],
+      format: 'rgba32float',
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+    });
+    const bytesPerRow = Math.ceil((width * 16) / 256) * 256;
+    const buffer = device.createBuffer({ size: bytesPerRow * height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const encoder = device.createCommandEncoder();
+    // Clear values can't be NaN either, so discarded pixels start at the same mark.
+    this.#draw(encoder, built, target, [MISSING, MISSING, MISSING, MISSING]);
+    encoder.copyTextureToBuffer({ texture: target }, { buffer, bytesPerRow }, [width, height]);
+    device.queue.submit([encoder.finish()]);
+    const error = await device.popErrorScope();
+    if (error) {
+      target.destroy();
+      buffer.destroy();
+      return error.message;
+    }
+    await buffer.mapAsync(GPUMapMode.READ);
+    const rows = new Float32Array(buffer.getMappedRange());
+    const out = new Float32Array(width * height * 4);
+    for (let y = 0; y < height; y++) {
+      const from = (y * bytesPerRow) / 4;
+      out.set(rows.subarray(from, from + width * 4), y * width * 4);
+    }
+    buffer.unmap();
+    buffer.destroy();
+    target.destroy();
+    for (let i = 0; i < out.length; i++) if (out[i]! <= MISSING / 2) out[i] = Number.NaN;
+    return out;
+  }
+
+  /** Compiles a fragment source into a pipeline for the capture, or says why it can't. */
+  async #pipeline(source: string, description: Description, format: GPUTextureFormat, label: string) {
+    const capture = this.#capture!;
+    const device = this.device;
+    const fragment = device.createShaderModule({ label, code: source });
     const info = await fragment.getCompilationInfo();
     const errors = info.messages.filter((m) => m.type === 'error');
-    if (errors.length > 0) {
-      await device.popErrorScope();
-      return errors.map((m) => `line ${m.lineNum}: ${m.message}`).join('\n');
-    }
+    if (errors.length > 0) return errors.map((m) => `line ${m.lineNum}: ${m.message}`).join('\n');
     const vertex = device.createShaderModule({ label: 'texelscope vertex stage', code: vertexStage(capture, description) });
     const layouts = this.#layouts(description);
     const pipeline = device.createRenderPipeline({
-      label: 'texelscope replay',
+      label,
       layout: device.createPipelineLayout({ bindGroupLayouts: layouts.map((l) => l.layout) }),
       vertex: { module: vertex, entryPoint: 'texelscope_vs' },
-      fragment: { module: fragment, entryPoint: capture.shader.entryPoint, targets: [{ format: capture.target.format }] },
+      fragment: { module: fragment, entryPoint: capture.shader.entryPoint, targets: [{ format }] },
       primitive: { topology: 'triangle-list' },
     });
-    const encoder = device.createCommandEncoder();
+    return { pipeline, layouts };
+  }
+
+  #draw(
+    encoder: GPUCommandEncoder,
+    { pipeline, layouts }: { pipeline: GPURenderPipeline; layouts: { layout: GPUBindGroupLayout; entries: GPUBindGroupEntry[] }[] },
+    target: GPUTexture,
+    clearValue: number[],
+  ) {
+    const device = this.device;
     const pass = encoder.beginRenderPass({
-      colorAttachments: [{ view: target.createView(), loadOp: 'clear', clearValue: [0, 0, 0, 0], storeOp: 'store' }],
+      colorAttachments: [{ view: target.createView(), loadOp: 'clear', clearValue, storeOp: 'store' }],
     });
     pass.setPipeline(pipeline);
     layouts.forEach(({ layout, entries }, group) => {
@@ -137,11 +228,6 @@ export class Replay {
     });
     pass.draw(3);
     pass.end();
-    device.queue.submit([encoder.finish()]);
-    const error = await device.popErrorScope();
-    if (error) return error.message;
-    this.present();
-    return undefined;
   }
 
   /** Copies the last render to the attached canvas. */
@@ -173,7 +259,8 @@ export class Replay {
   /** The color the GPU wrote at one pixel, as floats. */
   async readPixel(x: number, y: number): Promise<number[]> {
     const target = this.#target;
-    const format = this.#capture?.target.format;
+    const capture = this.#capture;
+    const format = capture?.reference ? 'rgba8unorm' : capture?.target.format;
     if (!target || !format) return [];
     const bytes = TEXEL_BYTES[format] ?? 4;
     const buffer = this.device.createBuffer({ size: 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });

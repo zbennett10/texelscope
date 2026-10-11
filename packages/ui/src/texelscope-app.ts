@@ -1,13 +1,24 @@
 import { LitElement, css, html, nothing } from 'lit';
 import type { Capture } from '@texelscope/sdk';
 import { Engine } from './engine/client.js';
-import { formatValue } from './format.js';
+import { formatValue, lineAt, lineStarts, ramp } from './format.js';
 import { Replay } from './gpu/replay.js';
-import type { Description, Explanation, ExprRef, Override, Rect, RegionData, SourceSpan, Trace, Value } from './types.js';
+import type {
+  Comparison,
+  Description,
+  Explanation,
+  ExprRef,
+  Override,
+  Rect,
+  RegionData,
+  SourceSpan,
+  Trace,
+  Value,
+} from './types.js';
 import { exampleCapture } from './example.js';
 import type { InlineValue } from './views/source-view.js';
 import { branchImage, layerImage } from './views/region-view.js';
-import type { Overlay } from './views/render-view.js';
+import type { Overlay, ProbeView } from './views/render-view.js';
 import './views/inspector.js';
 import './views/region-view.js';
 import './views/render-view.js';
@@ -30,6 +41,8 @@ export class TexelscopeApp extends LitElement {
     sourceError: { state: true },
     pixel: { state: true },
     explanation: { state: true },
+    comparePixel: { state: true },
+    comparison: { state: true },
     trace: { state: true },
     gpuColor: { state: true },
     inspectError: { state: true },
@@ -41,6 +54,7 @@ export class TexelscopeApp extends LitElement {
     regionBusy: { state: true },
     regionError: { state: true },
     shown: { state: true },
+    probe: { state: true },
     gpuError: { state: true },
     dragging: { state: true },
   };
@@ -49,7 +63,7 @@ export class TexelscopeApp extends LitElement {
     :host {
       display: grid;
       grid-template-columns: minmax(280px, 1fr) minmax(320px, 1.35fr) minmax(320px, 400px);
-      grid-template-rows: auto minmax(0, 1fr) 210px;
+      grid-template-rows: auto minmax(0, 1fr) 236px;
       height: 100vh;
       font: 13px/1.4 system-ui, sans-serif;
       color: #111827;
@@ -143,6 +157,9 @@ export class TexelscopeApp extends LitElement {
   declare sourceError: string;
   declare pixel: [number, number] | null;
   declare explanation: Explanation | null;
+  /** A second pixel to compare the selected one with, picked by Alt-click. */
+  declare comparePixel: [number, number] | null;
+  declare comparison: Comparison | null;
   declare trace: Trace | null;
   declare gpuColor: number[] | null;
   declare inspectError: string;
@@ -154,6 +171,10 @@ export class TexelscopeApp extends LitElement {
   declare regionBusy: boolean;
   declare regionError: string;
   declare shown: string;
+  /** A value the GPU shows over the whole image, while one is shown. */
+  declare probe: ProbeView | null;
+  #probeToken = 0;
+  #probeImage?: { data: Float32Array; channel: number; image: ImageData };
   declare gpuError: string;
   declare dragging: boolean;
 
@@ -175,6 +196,8 @@ export class TexelscopeApp extends LitElement {
     this.sourceError = '';
     this.pixel = null;
     this.explanation = null;
+    this.comparePixel = null;
+    this.comparison = null;
     this.trace = null;
     this.gpuColor = null;
     this.inspectError = '';
@@ -186,6 +209,7 @@ export class TexelscopeApp extends LitElement {
     this.regionBusy = false;
     this.regionError = '';
     this.shown = '';
+    this.probe = null;
     this.gpuError = '';
     this.dragging = false;
     this.#replayReady = Replay.create().then(
@@ -248,6 +272,8 @@ export class TexelscopeApp extends LitElement {
         .source=${this.source}
         .highlight=${this.highlight}
         .values=${this.#inlineValues()}
+        .notRun=${this.#notRun()}
+        .language=${frame?.capture.shader.language ?? 'wgsl'}
         .error=${this.sourceError}
         @edit=${(e: CustomEvent<string>) => this.#edit(e.detail)}
       ></texelscope-source-view>
@@ -255,10 +281,16 @@ export class TexelscopeApp extends LitElement {
         .targetWidth=${target?.width ?? 0}
         .targetHeight=${target?.height ?? 0}
         .selected=${this.pixel}
+        .compared=${this.comparePixel}
+        .inputsWindow=${frame?.capture.inputs?.kind === 'window' ? frame.capture.inputs.rect : null}
         .region=${this.regionRect}
         .overlay=${this.#overlay()}
+        .probe=${this.probe}
+        @probe-channel=${(e: CustomEvent<number>) => this.probe && (this.probe = { ...this.probe, channel: e.detail })}
+        @probe-hide=${() => this.#hideProbe()}
         .message=${frame ? this.gpuError : 'No capture yet.\nUse Example to try one, or send one from your app.'}
         @pick=${(e: CustomEvent<[number, number]>) => this.#pick(e.detail)}
+        @compare=${(e: CustomEvent<[number, number]>) => this.#compare(e.detail)}
         @region=${(e: CustomEvent<Rect>) => this.#inspectRegion(e.detail)}
       ></texelscope-render-view>
       <texelscope-region-view
@@ -267,11 +299,19 @@ export class TexelscopeApp extends LitElement {
         .error=${this.regionError}
         .shown=${this.shown}
         .source=${this.#valid}
-        @show=${(e: CustomEvent<string>) => (this.shown = e.detail)}
+        @show=${(e: CustomEvent<string>) => {
+          this.shown = e.detail;
+          if (e.detail) this.#hideProbe();
+        }}
+        @probe=${(e: CustomEvent<{ expr: ExprRef; name: string }>) => this.#showProbe(e.detail.expr, e.detail.name)}
         @highlight=${(e: CustomEvent<SourceSpan>) => (this.highlight = e.detail)}
       ></texelscope-region-view>
       <texelscope-inspector
         .explanation=${this.explanation}
+        .comparison=${this.comparison}
+        .language=${frame?.capture.shader.language ?? 'wgsl'}
+        @stop-compare=${() => this.#compare(null)}
+        @probe=${(e: CustomEvent<{ expr: ExprRef; name: string }>) => this.#showProbe(e.detail.expr, e.detail.name)}
         .trace=${this.trace}
         .gpuColor=${this.gpuColor}
         .format=${target?.format ?? 'rgba8unorm'}
@@ -363,6 +403,7 @@ export class TexelscopeApp extends LitElement {
 
   /** Renders on the GPU and re-inspects the pixel and region with the current overrides. */
   async #refresh(pixel?: [number, number]) {
+    if (this.probe) void this.#showProbe(this.probe.expr, this.probe.name);
     await this.#renderGpu();
     if (pixel) await this.#pick(pixel);
     if (this.regionRect) await this.#inspectRegion(this.regionRect);
@@ -371,6 +412,14 @@ export class TexelscopeApp extends LitElement {
   async #renderGpu() {
     if (!this.#replay || !this.description) return;
     const overrides = this.whatIf.map((w) => w.override);
+    // A WebGL capture shows the frame the app drew, which what-ifs can't change.
+    if (this.frames[this.current]?.capture.shader.language === 'glsl') {
+      await this.#replay.render(this.#valid, this.description);
+      this.gpuError = overrides.length > 0
+        ? "This is your app's frame. What-ifs show in the explanation, since WebGL captures can't be replayed on the GPU yet."
+        : '';
+      return;
+    }
     let source = this.#valid;
     if (overrides.length > 0) {
       try {
@@ -386,7 +435,7 @@ export class TexelscopeApp extends LitElement {
   async #pick(pixel: [number, number]) {
     const token = ++this.#inspectToken;
     this.pixel = pixel;
-    this.explanation = null;
+    // The last explanation stays up until the new one arrives, so the inspector keeps its scroll.
     this.inspectError = '';
     const overrides = this.whatIf.map((w) => w.override);
     try {
@@ -402,6 +451,70 @@ export class TexelscopeApp extends LitElement {
       this.step = trace.result;
     } catch (error) {
       if (token === this.#inspectToken) this.inspectError = (error as Error).message;
+    }
+    if (this.comparePixel) await this.#compare(this.comparePixel);
+  }
+
+  /** Shows one value over the whole image, computed on the GPU by a rewritten shader. */
+  async #showProbe(expr: ExprRef, name: string) {
+    this.shown = '';
+    const token = ++this.#probeToken;
+    this.probe = { expr, name, components: 1, channel: 0, data: null, min: [], max: [], error: '' };
+    const overrides = this.whatIf.map((w) => w.override);
+    try {
+      const { wgsl, components } = await this.#engine.probe(expr, overrides);
+      const data = this.#replay && this.description
+        ? await this.#replay.probe(wgsl, this.description)
+        : 'WebGPU is not available, so values can only be shown for a region.';
+      if (token !== this.#probeToken || !this.probe) return;
+      if (typeof data === 'string') {
+        this.probe = { ...this.probe, error: data };
+        return;
+      }
+      const { min, max } = ranges(data, components);
+      this.probe = { ...this.probe, components, data, min, max };
+    } catch (error) {
+      if (token === this.#probeToken && this.probe) this.probe = { ...this.probe, error: (error as Error).message };
+    }
+  }
+
+  #hideProbe() {
+    ++this.#probeToken;
+    this.probe = null;
+  }
+
+  /** The probe as an image, kept until the data or channel changes. */
+  #probeOverlay(probe: ProbeView, width: number, height: number): ImageData {
+    const cached = this.#probeImage;
+    if (cached && cached.data === probe.data && cached.channel === probe.channel) return cached.image;
+    const data = probe.data!;
+    const c = probe.channel;
+    const lo = probe.min[c] ?? 0;
+    const span = (probe.max[c] ?? 1) - lo || 1;
+    const image = new ImageData(width, height);
+    for (let p = 0; p < width * height; p++) {
+      const v = data[p * 4 + c]!;
+      if (Number.isNaN(v)) continue;
+      const [r, g, b] = ramp((v - lo) / span);
+      image.data.set([r * 255, g * 255, b * 255, 255], p * 4);
+    }
+    this.#probeImage = { data, channel: c, image };
+    return image;
+  }
+
+  /** Compares the selected pixel with another, or stops comparing when given null. */
+  async #compare(other: [number, number] | null) {
+    this.comparePixel = other;
+    const pixel = this.pixel;
+    if (!other || !pixel) {
+      this.comparison = null;
+      return;
+    }
+    try {
+      this.comparison = await this.#engine.compare(pixel, other, this.whatIf.map((w) => w.override));
+    } catch (error) {
+      this.comparison = null;
+      this.inspectError = (error as Error).message;
     }
   }
 
@@ -456,15 +569,29 @@ export class TexelscopeApp extends LitElement {
   }
 
   /** The last value of each named value on its line, from the current trace. */
+  /** Lines of code the selected pixel never ran, so the source view can dim them. */
+  #notRun(): number[] {
+    const trace = this.trace;
+    const code = this.description?.codeLines;
+    if (!trace || !code) return [];
+    const starts = lineStarts(this.#valid);
+    const run = new Set<number>();
+    const mark = (span: SourceSpan | null | undefined) => {
+      if (!span) return;
+      const last = lineAt(starts, Math.max(span.start, span.end - 1));
+      for (let line = lineAt(starts, span.start); line <= last; line++) run.add(line);
+    };
+    for (const step of trace.steps) mark(step.span);
+    for (const store of trace.stores) mark(store.span);
+    for (const branch of trace.branches) mark(branch.span);
+    return code.filter((line) => !run.has(line));
+  }
+
   #inlineValues(): InlineValue[] {
     const trace = this.trace;
     if (!trace) return [];
-    const source = this.#valid;
-    const lineOf = (offset: number) => {
-      let line = 1;
-      for (let i = 0; i < offset && i < source.length; i++) if (source.charCodeAt(i) === 10) line++;
-      return line;
-    };
+    const starts = lineStarts(this.#valid);
+    const lineOf = (offset: number) => lineAt(starts, offset);
     const byLine = new Map<number, Map<string, { text: string; count: number }>>();
     const put = (span: SourceSpan | null, name: string, text: string) => {
       if (!span) return;
@@ -486,6 +613,11 @@ export class TexelscopeApp extends LitElement {
   }
 
   #overlay(): Overlay | null {
+    const probe = this.probe;
+    const target = this.frames[this.current]?.capture.target;
+    if (probe?.data && target) {
+      return { rect: { x: 0, y: 0, width: target.width, height: target.height }, image: this.#probeOverlay(probe, target.width, target.height) };
+    }
     const region = this.region;
     if (!region || !this.shown) return null;
     const [kind, at] = this.shown.split(':');
@@ -506,4 +638,19 @@ declare global {
   interface HTMLElementTagNameMap {
     'texelscope-app': TexelscopeApp;
   }
+}
+
+/** The smallest and largest finite value of each channel. */
+function ranges(data: Float32Array, components: number): { min: number[]; max: number[] } {
+  const min = Array(components).fill(Infinity);
+  const max = Array(components).fill(-Infinity);
+  for (let p = 0; p < data.length; p += 4) {
+    for (let c = 0; c < components; c++) {
+      const v = data[p + c]!;
+      if (!Number.isFinite(v)) continue;
+      if (v < min[c]) min[c] = v;
+      if (v > max[c]) max[c] = v;
+    }
+  }
+  return { min: min.map((v) => (Number.isFinite(v) ? v : 0)), max: max.map((v) => (Number.isFinite(v) ? v : 0)) };
 }

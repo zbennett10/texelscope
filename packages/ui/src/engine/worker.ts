@@ -36,6 +36,16 @@ self.onmessage = async (event: MessageEvent<{ id: number; method: string; args: 
         result = JSON.parse(need().explainPixel(x, y, JSON.stringify(overrides)));
         break;
       }
+      case 'probe': {
+        const [expr, overrides] = args as [unknown, unknown];
+        result = JSON.parse(need().probeSource(JSON.stringify(expr), JSON.stringify(overrides)));
+        break;
+      }
+      case 'compare': {
+        const [[ax, ay], [bx, by], overrides] = args as [[number, number], [number, number], unknown];
+        result = JSON.parse(need().comparePixels(ax, ay, bx, by, JSON.stringify(overrides)));
+        break;
+      }
       case 'region': {
         const [rect, overrides, scope] = args as [{ x: number; y: number; width: number; height: number }, unknown, unknown];
         const region = need().inspectRegion(rect.x, rect.y, rect.width, rect.height, JSON.stringify(overrides), JSON.stringify(scope ?? null));

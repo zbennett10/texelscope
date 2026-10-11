@@ -1,5 +1,22 @@
-import { LitElement, css, html } from 'lit';
-import type { Rect } from '../types.js';
+import { LitElement, css, html, nothing, unsafeCSS } from 'lit';
+import { css as colorCss, fixed, ramp } from '../format.js';
+import type { ExprRef, Rect } from '../types.js';
+
+/** A value the GPU computed at every pixel, shown over the image. */
+export interface ProbeView {
+  expr: ExprRef;
+  name: string;
+  components: number;
+  /** The channel shown, from 0 to `components - 1`. */
+  channel: number;
+  /** Four floats per pixel, NaN where a pixel never computed the value. Null while running. */
+  data: Float32Array | null;
+  min: number[];
+  max: number[];
+  error: string;
+}
+
+const RAMP_CSS = `linear-gradient(90deg, ${[0, 0.25, 0.5, 0.75, 1].map((t) => colorCss([...ramp(t), 1])).join(', ')})`;
 
 /** A layer image drawn over part of the render. */
 export interface Overlay {
@@ -16,8 +33,11 @@ export class TexelscopeRenderView extends LitElement {
     targetWidth: { type: Number },
     targetHeight: { type: Number },
     selected: { attribute: false },
+    compared: { attribute: false },
+    inputsWindow: { attribute: false },
     region: { attribute: false },
     overlay: { attribute: false },
+    probe: { attribute: false },
     message: { type: String },
   };
 
@@ -69,13 +89,73 @@ export class TexelscopeRenderView extends LitElement {
       color: #f9fafb;
       font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
     }
+    .legend {
+      position: absolute;
+      top: 8px;
+      left: 8px;
+      right: 8px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 4px 8px;
+      padding: 5px 8px;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.94);
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+      font: 12px system-ui, sans-serif;
+      color: #111827;
+    }
+    .legend code {
+      font: 600 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .legend .ramp {
+      display: inline-block;
+      width: 64px;
+      height: 10px;
+      border-radius: 2px;
+      background: ${unsafeCSS(RAMP_CSS)};
+    }
+    .legend .dim {
+      color: #6b7280;
+    }
+    .legend .error {
+      color: #991b1b;
+    }
+    .legend button {
+      padding: 0 6px;
+      border: 1px solid #d1d5db;
+      border-radius: 4px;
+      background: #fff;
+      font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+      cursor: pointer;
+    }
+    .legend button.on {
+      background: #111827;
+      color: #fff;
+    }
+    .legend .hide {
+      margin-left: auto;
+      font-family: system-ui, sans-serif;
+    }
+    .hud.hint {
+      left: 8px;
+      font: 11.5px system-ui, sans-serif;
+      text-align: center;
+      pointer-events: none;
+    }
   `;
 
   declare targetWidth: number;
   declare targetHeight: number;
   declare selected: [number, number] | null;
+  /** A second pixel the first is compared with. */
+  declare compared: [number, number] | null;
+  /** Where a WebGL capture recorded its inputs, the only pixels the interpreter can run. */
+  declare inputsWindow: Rect | null;
   declare region: Rect | null;
   declare overlay: Overlay | null;
+  /** A value shown over the whole image, with its legend. */
+  declare probe: ProbeView | null;
   declare message: string;
 
   #scale = 1;
@@ -91,9 +171,44 @@ export class TexelscopeRenderView extends LitElement {
     this.targetWidth = 0;
     this.targetHeight = 0;
     this.selected = null;
+    this.compared = null;
+    this.inputsWindow = null;
     this.region = null;
     this.overlay = null;
+    this.probe = null;
     this.message = '';
+  }
+
+  /** What the shown value is at a pixel, for the readout. */
+  #probeAt([x, y]: [number, number]): string {
+    const probe = this.probe;
+    if (!probe?.data) return '';
+    const at = (y * this.targetWidth + x) * 4;
+    const values = Array.from(probe.data.subarray(at, at + probe.components));
+    const text = values.some(Number.isNaN) ? 'not computed' : values.map((v) => fixed(v, 4)).join(', ');
+    return ` · ${probe.name} = ${text}`;
+  }
+
+  #legend() {
+    const probe = this.probe;
+    if (!probe) return nothing;
+    const emit = (name: string, detail: unknown) => this.dispatchEvent(new CustomEvent(name, { detail }));
+    const c = probe.channel;
+    const lanes = ['x', 'y', 'z', 'w'].slice(0, probe.components);
+    return html`<div class="legend" @pointerdown=${(e: Event) => e.stopPropagation()}>
+      <span><code>${probe.name}</code> over the whole image</span>
+      ${probe.error
+        ? html`<span class="error">${probe.error}</span>`
+        : !probe.data
+          ? html`<span class="dim">computing on the GPU...</span>`
+          : html`<span class="dim">${fixed(probe.min[c] ?? 0, 4)}</span><span class="ramp"></span
+              ><span class="dim">${fixed(probe.max[c] ?? 0, 4)}</span>
+              ${probe.components > 1
+                ? lanes.map((lane, k) => html`<button class=${k === c ? 'on' : ''} @click=${() => emit('probe-channel', k)}>${lane}</button>`)
+                : nothing}
+              <span class="dim">Clear where a pixel never computed it. Hover to read values.</span>`}
+      <button class="hide" @click=${() => emit('probe-hide', null)}>Hide</button>
+    </div>`;
   }
 
   /** The canvas the GPU replay presents into. */
@@ -112,7 +227,11 @@ export class TexelscopeRenderView extends LitElement {
   }
 
   override render() {
-    const pixel = this.#hover ? `${this.#hover[0]}, ${this.#hover[1]}` : '';
+    const hud = this.#hover
+      ? `${this.#hover[0]}, ${this.#hover[1]}${this.#probeAt(this.#hover)} · ${Math.round(this.#scale * 100)}%`
+      : this.targetWidth && !this.message
+        ? 'Click a pixel to explain it, then Alt-click another to compare. Shift-drag to inspect a region. Scroll to zoom, drag to pan, double-click to fit.'
+        : '';
     return html`
       <div class="stage">
         <canvas class="gpu" width=${this.targetWidth || 1} height=${this.targetHeight || 1}></canvas>
@@ -120,7 +239,8 @@ export class TexelscopeRenderView extends LitElement {
       </div>
       <canvas class="marks"></canvas>
       ${this.message ? html`<div class="message">${this.message}</div>` : ''}
-      ${pixel ? html`<div class="hud">${pixel} · ${Math.round(this.#scale * 100)}%</div>` : ''}
+      ${hud ? html`<div class="hud ${this.#hover ? '' : 'hint'}">${hud}</div>` : ''}
+      ${this.#legend()}
     `;
   }
 
@@ -212,7 +332,8 @@ export class TexelscopeRenderView extends LitElement {
     if (drag.region && drag.moved && this.region) {
       this.dispatchEvent(new CustomEvent('region', { detail: this.region }));
     } else if (!drag.moved && this.#inside(pixel)) {
-      this.dispatchEvent(new CustomEvent('pick', { detail: pixel }));
+      // Alt-click picks a second pixel to compare with the first.
+      this.dispatchEvent(new CustomEvent(e.altKey && this.selected ? 'compare' : 'pick', { detail: pixel }));
     }
   }
 
@@ -261,6 +382,18 @@ export class TexelscopeRenderView extends LitElement {
     const g = marks.getContext('2d')!;
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     const toScreen = (x: number, y: number): [number, number] => [this.#ox + x * this.#scale, this.#oy + y * this.#scale];
+    if (this.inputsWindow) {
+      const w = this.inputsWindow;
+      const [x, y] = toScreen(w.x, w.y);
+      g.strokeStyle = '#d97706';
+      g.lineWidth = 1;
+      g.setLineDash([2, 3]);
+      g.strokeRect(x, y, w.width * this.#scale, w.height * this.#scale);
+      g.setLineDash([]);
+      g.font = '11px system-ui, sans-serif';
+      g.fillStyle = '#b45309';
+      g.fillText('inputs recorded here', x + 3, y - 4);
+    }
     if (this.region) {
       const [x, y] = toScreen(this.region.x, this.region.y);
       g.strokeStyle = '#2563eb';
@@ -269,30 +402,42 @@ export class TexelscopeRenderView extends LitElement {
       g.strokeRect(x, y, this.region.width * this.#scale, this.region.height * this.#scale);
       g.setLineDash([]);
     }
-    if (this.selected) {
-      const [x, y] = toScreen(this.selected[0], this.selected[1]);
-      const size = Math.max(this.#scale, 1);
-      const pad = Math.max(3, size * 0.15);
-      g.lineWidth = 2;
+    const label = this.compared ? 'A' : '';
+    if (this.selected) this.#mark(g, toScreen(this.selected[0], this.selected[1]), '#db2777', label);
+    if (this.compared) this.#mark(g, toScreen(this.compared[0], this.compared[1]), '#2563eb', 'B');
+  }
+
+  /** A box around one pixel, with a crosshair when zoomed out and an optional letter. */
+  #mark(g: CanvasRenderingContext2D, [x, y]: [number, number], color: string, label: string) {
+    const size = Math.max(this.#scale, 1);
+    const pad = Math.max(3, size * 0.15);
+    g.lineWidth = 2;
+    g.strokeStyle = '#ffffff';
+    g.strokeRect(x - pad, y - pad, size + pad * 2, size + pad * 2);
+    g.lineWidth = 1;
+    g.strokeStyle = color;
+    g.strokeRect(x - pad, y - pad, size + pad * 2, size + pad * 2);
+    if (this.#scale < 6) {
+      const cx = x + size / 2;
+      const cy = y + size / 2;
+      g.beginPath();
+      g.moveTo(cx - 14, cy);
+      g.lineTo(cx - 5, cy);
+      g.moveTo(cx + 5, cy);
+      g.lineTo(cx + 14, cy);
+      g.moveTo(cx, cy - 14);
+      g.lineTo(cx, cy - 5);
+      g.moveTo(cx, cy + 5);
+      g.lineTo(cx, cy + 14);
+      g.stroke();
+    }
+    if (label) {
+      g.font = '600 11px system-ui, sans-serif';
+      g.lineWidth = 3;
       g.strokeStyle = '#ffffff';
-      g.strokeRect(x - pad, y - pad, size + pad * 2, size + pad * 2);
-      g.lineWidth = 1;
-      g.strokeStyle = '#db2777';
-      g.strokeRect(x - pad, y - pad, size + pad * 2, size + pad * 2);
-      if (this.#scale < 6) {
-        const cx = x + size / 2;
-        const cy = y + size / 2;
-        g.beginPath();
-        g.moveTo(cx - 14, cy);
-        g.lineTo(cx - 5, cy);
-        g.moveTo(cx + 5, cy);
-        g.lineTo(cx + 14, cy);
-        g.moveTo(cx, cy - 14);
-        g.lineTo(cx, cy - 5);
-        g.moveTo(cx, cy + 5);
-        g.lineTo(cx, cy + 14);
-        g.stroke();
-      }
+      g.strokeText(label, x + size + pad + 3, y - pad);
+      g.fillStyle = color;
+      g.fillText(label, x + size + pad + 3, y - pad);
     }
   }
 }

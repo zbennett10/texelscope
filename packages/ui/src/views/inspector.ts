@@ -1,23 +1,41 @@
 import { LitElement, css, html, nothing } from 'lit';
 import { css as colorCss, fixed, formatValue, numbers, parseLike } from '../format.js';
 import { quantize } from '../gpu/replay.js';
-import type { Explanation, Link, SourceSpan, Step, Trace } from '../types.js';
+import type { Comparison, Explanation, Link, Reason, SourceSpan, Step, Trace, Value } from '../types.js';
+import { callTree, type LinkNode, type LinkPlace } from './link-tree.js';
 
-const KIND_LABEL: Record<Link['kind'], string> = { input: 'in', buffer: 'uniform', texture: 'texture', let: 'let', var: 'var' };
+/** How each kind of value is labeled, and what it means. */
+const KIND: Record<Link['kind'], { label: string; title: string }> = {
+  input: { label: 'input', title: 'A fragment input, such as the pixel position' },
+  buffer: { label: 'buffer', title: 'Read from a uniform or storage buffer' },
+  texture: { label: 'texture', title: 'Read from a texture' },
+  let: { label: 'let', title: 'A named value the shader computed' },
+  var: { label: 'var', title: 'The value a variable was last assigned' },
+};
+
+/** A value's name, without the texel a texture read names again on its detail line. */
+function shortName(link: Link): string {
+  return link.kind === 'texture' ? link.name.replace(/ \([^)]*\)$/, '') : link.name;
+}
 
 /** Why the selected pixel has its color: values, decisions, sensitivities and the trace. */
 export class TexelscopeInspector extends LitElement {
   static override properties = {
     explanation: { attribute: false },
+    comparison: { attribute: false },
     trace: { attribute: false },
     gpuColor: { attribute: false },
     format: { type: String },
     whatIf: { attribute: false },
     source: { type: String },
+    language: { type: String },
     busy: { type: Boolean },
     error: { type: String },
     step: { attribute: false },
     namedOnly: { state: true },
+    showSettings: { state: true },
+    open: { state: true },
+    closed: { state: true },
     editing: { state: true },
   };
 
@@ -44,9 +62,133 @@ export class TexelscopeInspector extends LitElement {
       text-transform: uppercase;
       color: #6b7280;
     }
-    h2 button {
+    h2 button,
+    h2 label {
       text-transform: none;
       letter-spacing: 0;
+      font-weight: 400;
+    }
+    .why {
+      margin: 10px 0 2px;
+    }
+    .why.versus p {
+      border-left-color: #2563eb;
+      background: #eff6ff;
+    }
+    .compare {
+      background: #f8fafc;
+    }
+    .compare h3 {
+      margin: 10px 0 4px;
+      font-size: 11px;
+      font-weight: 600;
+      color: #6b7280;
+    }
+    .vs {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, auto) minmax(0, auto);
+      gap: 2px 10px;
+      align-items: baseline;
+      padding: 2px 4px;
+      border-radius: 4px;
+      font: 11.5px ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .vs:hover {
+      background: #eff6ff;
+    }
+    .vs.same {
+      color: #9ca3af;
+    }
+    .vs.head {
+      color: #6b7280;
+      font: 600 10.5px system-ui, sans-serif;
+      text-align: right;
+    }
+    .vs .v {
+      max-width: 9em;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      text-align: right;
+    }
+    details summary {
+      margin-top: 8px;
+      color: #4b5563;
+      cursor: pointer;
+    }
+    .why p {
+      margin: 0 0 6px;
+      padding: 4px 8px;
+      border-left: 3px solid #db2777;
+      border-radius: 0 4px 4px 0;
+      background: #fdf2f8;
+      font-size: 12.5px;
+      line-height: 1.5;
+      cursor: default;
+    }
+    .why code {
+      padding: 0 3px;
+      border-radius: 3px;
+      background: rgba(17, 24, 39, 0.06);
+      font: 11.5px ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .intro {
+      margin: -2px 0 6px;
+      color: #6b7280;
+      font-size: 11.5px;
+      line-height: 1.45;
+    }
+    .scope {
+      color: #9ca3af;
+    }
+    .fold {
+      display: block;
+      width: 100%;
+      margin: 1px 0;
+      padding: 3px 4px;
+      border: 0;
+      border-radius: 4px;
+      background: none;
+      text-align: left;
+      font: 600 11.5px ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: #374151;
+    }
+    .fold:hover {
+      background: #f3f4f6;
+    }
+    .fold .dim {
+      margin-left: 6px;
+      font-weight: 400;
+    }
+    .caret {
+      display: inline-block;
+      width: 12px;
+      color: #6b7280;
+    }
+    .inside {
+      margin-left: 9px;
+      padding-left: 6px;
+      border-left: 1px solid #e5e7eb;
+    }
+    .badge.input {
+      background: #e0e7ff;
+      color: #3730a3;
+    }
+    .badge.buffer {
+      background: #f3f4f6;
+      color: #4b5563;
+    }
+    .badge.texture {
+      background: #f3e8ff;
+      color: #6b21a8;
+    }
+    .badge.let {
+      background: #ccfbf1;
+      color: #115e59;
+    }
+    .badge.var {
+      background: #fef3c7;
+      color: #92400e;
     }
     .empty {
       padding: 24px 16px;
@@ -93,7 +235,7 @@ export class TexelscopeInspector extends LitElement {
     }
     .row {
       display: grid;
-      grid-template-columns: 54px minmax(0, 1fr) auto;
+      grid-template-columns: 54px minmax(56px, 1fr) minmax(0, auto);
       gap: 2px 8px;
       align-items: baseline;
       padding: 3px 4px;
@@ -121,9 +263,18 @@ export class TexelscopeInspector extends LitElement {
       font-size: 11.5px;
     }
     .value {
+      display: flex;
+      align-items: baseline;
+      justify-content: flex-end;
+      gap: 6px;
+      min-width: 0;
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       font-size: 11.5px;
-      text-align: right;
+    }
+    .value .v {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     button {
       font: inherit;
@@ -139,6 +290,13 @@ export class TexelscopeInspector extends LitElement {
       border-color: #9ca3af;
     }
     .decision {
+      grid-template-columns: minmax(0, 1fr) auto;
+    }
+    .decision .detail {
+      grid-column: 1 / 3;
+      font-family: inherit;
+    }
+    .sense {
       grid-template-columns: minmax(0, 1fr) auto auto;
     }
     .bars {
@@ -195,30 +353,45 @@ export class TexelscopeInspector extends LitElement {
   `;
 
   declare explanation: Explanation | null;
+  /** What sets the selected pixel apart from a second one, while comparing. */
+  declare comparison: Comparison | null;
   declare trace: Trace | null;
   declare gpuColor: number[] | null;
   declare format: string;
   /** Labels of the overrides in effect. */
   declare whatIf: string[];
   declare source: string;
+  /** The shader's language, which decides what can be pinned. */
+  declare language: 'wgsl' | 'glsl';
   declare busy: boolean;
   declare error: string;
   declare step: number | null;
   declare namedOnly: boolean;
+  /** Whether values that only read settings show in the list from data to color. */
+  declare showSettings: boolean;
+  /** Function calls opened in the list from data to color, by their tree keys. */
+  declare open: Set<string>;
+  /** Calls closed by hand that would otherwise start open. */
+  declare closed: Set<string>;
   declare editing: number | null;
 
   constructor() {
     super();
     this.explanation = null;
+    this.comparison = null;
     this.trace = null;
     this.gpuColor = null;
     this.format = 'rgba8unorm';
     this.whatIf = [];
     this.source = '';
+    this.language = 'wgsl';
     this.busy = false;
     this.error = '';
     this.step = null;
     this.namedOnly = true;
+    this.showSettings = false;
+    this.open = new Set();
+    this.closed = new Set();
     this.editing = null;
   }
 
@@ -232,7 +405,8 @@ export class TexelscopeInspector extends LitElement {
       </div>`;
     }
     return html`
-      ${this.#colors(e)} ${this.#overrides()} ${this.#links(e)} ${this.#decisions(e)} ${this.#sensitivities(e)}
+      ${this.#comparison()} ${this.#colors(e)} ${this.#overrides()} ${this.#links(e)} ${this.#decisions(e)}
+      ${this.#sensitivities(e)}
       ${this.#trace()}
     `;
   }
@@ -265,7 +439,73 @@ export class TexelscopeInspector extends LitElement {
     return html`<section>
       <h2>Pixel ${e.pixel[0]}, ${e.pixel[1]} ${parity}</h2>
       <div class="colors">${row('GPU', gpu)} ${row('CPU', cpu)}</div>
+      ${this.#why(e)}
+      <p class="intro" style="margin-top: 6px">
+        GPU is what your app drew. CPU is Texelscope running the shader itself, which the rest of this panel
+        explains. Code this pixel didn't run is dimmed in the source.
+      </p>
       ${e.notes.map((n) => html`<div class="dim">${n}</div>`)}
+    </section>`;
+  }
+
+  /** Why the pixel has its color, a few sentences long. */
+  #why(e: Explanation) {
+    return this.#reasons(e.why);
+  }
+
+  #reasons(reasons: Reason[], kind = '') {
+    if (reasons.length === 0) return nothing;
+    return html`<div class="why ${kind}">
+      ${reasons.map(
+        (reason) => html`<p @mouseenter=${() => this.#highlight(reason.span)} @click=${() => this.#highlight(reason.span)}>
+          ${reason.text.split('`').map((part, i) => (i % 2 === 1 ? html`<code>${part}</code>` : part))}
+        </p>`,
+      )}
+    </div>`;
+  }
+
+  /** What sets the selected pixel, A, apart from the one Alt-clicked, B. */
+  #comparison() {
+    const c = this.comparison;
+    if (!c) return nothing;
+    const swatch = (value: Value) => {
+      const rgba = numbers(value);
+      return html`<span class="swatch" style="--c: ${rgba.length ? colorCss(rgba) : 'transparent'}"></span>`;
+    };
+    const side = (v: boolean | null) => (v === null ? html`<span class="dim">not run</span>` : html`<span class="badge ${v ? 'ok' : ''}">${v}</span>`);
+    const value = (v: Value | null) => (v === null ? '-' : formatValue(v));
+    return html`<section class="compare">
+      <h2>Comparing A and B <button @click=${() => this.#emit('stop-compare', null)}>Stop</button></h2>
+      <div class="colors">
+        ${swatch(c.colorA)}<div class="mono">A ${c.a[0]}, ${c.a[1]}</div>
+        ${swatch(c.colorB)}<div class="mono">B ${c.b[0]}, ${c.b[1]}</div>
+      </div>
+      ${this.#reasons(c.summary, 'versus')}
+      ${c.decisions.length > 0
+        ? html`<h3>Decisions that differ</h3>
+            ${c.decisions.map(
+              (d) => html`<div class="vs" @mouseenter=${() => this.#highlight(d.span)}>
+                <span class="name" title=${d.condition}>${d.condition}</span>
+                <span>A ${side(d.a)}</span><span>B ${side(d.b)}</span>
+              </div>`,
+            )}`
+        : nothing}
+      ${c.values.length > 0
+        ? html`<h3>Values on the way to the color</h3>
+            <div class="vs head"><span></span><span>A</span><span>B</span></div>
+            ${c.values.map((v) => {
+              const same = v.a !== null && v.b !== null && formatValue(v.a) === formatValue(v.b);
+              const name = v.scope ? `${v.scope}: ${v.name}` : v.name;
+              return html`<div class="vs ${same ? 'same' : ''}" @mouseenter=${() => this.#highlight(v.span)}>
+                <span class="name" title=${name}>${name}</span>
+                <span class="v" title=${value(v.a)}>${value(v.a)}</span><span class="v" title=${value(v.b)}>${value(v.b)}</span>
+              </div>`;
+            })}`
+        : nothing}
+      <details>
+        <summary>Why B has its color</summary>
+        ${this.#reasons(c.whyB)}
+      </details>
     </section>`;
   }
 
@@ -273,10 +513,10 @@ export class TexelscopeInspector extends LitElement {
     if (this.whatIf.length === 0) return nothing;
     return html`<section>
       <h2>What if <button @click=${() => this.#emit('clear-overrides', null)}>Clear</button></h2>
+      <p class="intro">Changes you're trying. The image and everything below show their effect.</p>
       ${this.whatIf.map(
         (label, i) => html`<div class="row decision">
           <span class="name" title=${label}>${label}</span>
-          <span></span>
           <button @click=${() => this.#emit('remove-override', i)}>Remove</button>
         </div>`,
       )}
@@ -284,24 +524,85 @@ export class TexelscopeInspector extends LitElement {
   }
 
   #links(e: Explanation) {
+    const settings = e.links.filter((l) => l.setting).length;
+    const places: LinkPlace[] = e.links.flatMap((link, index) => {
+      if (link.setting && !this.showSettings) return [];
+      const step = link.step !== null ? this.trace?.steps[link.step] : undefined;
+      return [{ index, depth: step?.depth ?? 0, call: step?.call ?? 0, scope: link.scope }];
+    });
     return html`<section>
-      <h2>From data to color</h2>
-      ${e.links.map((link, i) => {
-        const name = link.scope ? `${link.scope}: ${link.name}` : link.name;
-        const pinnable = link.expr && link.kind !== 'var' && numbers(link.value).length > 0;
-        return html`<div class="row" @mouseenter=${() => this.#highlight(link.span)} @click=${() => this.#highlight(link.span)}>
-          <span class="badge">${KIND_LABEL[link.kind]}</span>
-          <span class="name" title=${name}>${name}</span>
-          ${this.editing === i
-            ? html`<input class="pin" autofocus .value=${numbers(link.value).map((n) => fixed(n, 6)).join(', ')}
-                @keydown=${(ev: KeyboardEvent) => this.#pinKey(ev, link)} @blur=${() => (this.editing = null)} />`
-            : html`<span class="value" title="Click to try another value" @dblclick=${() => pinnable && (this.editing = i)}>
-                ${formatValue(link.value)} ${pinnable ? html`<button @click=${() => (this.editing = i)}>Pin</button>` : nothing}
-              </span>`}
-          <span class="detail" title=${link.detail}>${link.detail}</span>
-        </div>`;
-      })}
+      <h2>From data to color ${this.#settingsToggle(settings + e.decisions.filter((d) => d.setting).length)}</h2>
+      <p class="intro">
+        Every value this pixel computed on its way to its color, in order. Open a function call to see the values inside
+        it. Pin a value to try another one.${settings > 0 && !this.showSettings ? ` ${settings} values that only read settings are hidden.` : ''}
+      </p>
+      ${this.#nodes(callTree(places), e, null)}
     </section>`;
+  }
+
+  /** The checkbox that shows values and decisions that only read settings. */
+  #settingsToggle(count: number) {
+    if (count === 0) return nothing;
+    return html`<label class="dim" title="Values and decisions that come only from settings, the same at every pixel"
+      ><input type="checkbox" .checked=${this.showSettings}
+        @change=${(ev: Event) => (this.showSettings = (ev.target as HTMLInputElement).checked)} /> settings (${count})</label
+    >`;
+  }
+
+  #nodes(nodes: LinkNode[], e: Explanation, within: string | null): unknown {
+    // A lone call at the top, such as GLSL's main, holds the whole story, so it starts open.
+    const lone = within === null && nodes.filter((n) => n.kind === 'call').length === 1;
+    return nodes.map((node) => {
+      if (node.kind === 'row') return this.#link(e.links[node.index]!, node.index, within);
+      const open = this.open.has(node.key) || (lone && !this.closed.has(node.key));
+      return html`<div class="call">
+        <button class="fold" data-call=${node.key} aria-expanded=${open ? 'true' : 'false'} @click=${() => this.#toggle(node.key)}>
+          <span class="caret">${open ? '▾' : '▸'}</span> ${node.name}
+          <span class="dim">${node.size} values</span>
+        </button>
+        ${open ? html`<div class="inside">${this.#nodes(node.children, e, node.name)}</div>` : nothing}
+      </div>`;
+    });
+  }
+
+  #toggle(key: string) {
+    const open = new Set(this.open);
+    const closed = new Set(this.closed);
+    const wasOpen = this.renderRoot.querySelector(`[data-call="${CSS.escape(key)}"]`)?.getAttribute('aria-expanded') === 'true';
+    if (wasOpen) {
+      open.delete(key);
+      closed.add(key);
+    } else {
+      open.add(key);
+      closed.delete(key);
+    }
+    this.open = open;
+    this.closed = closed;
+  }
+
+  #link(link: Link, i: number, within: string | null) {
+    const name = link.scope ? `${link.scope}: ${link.name}` : link.name;
+    const numeric = !!link.expr && numbers(link.value).length > 0;
+    // A var's value comes from its assignment, which a WGSL patch can't replace by itself yet.
+    const pinnable = numeric && (link.kind !== 'var' || this.language === 'glsl');
+    // Inside a call to its own function, a value needs no function name.
+    const scope = link.scope && link.scope !== within ? html`<span class="scope">${link.scope}:</span> ` : nothing;
+    return html`<div class="row" @mouseenter=${() => this.#highlight(link.span)} @click=${() => this.#highlight(link.span)}>
+      <span class="badge ${link.kind}" title=${KIND[link.kind].title}>${KIND[link.kind].label}</span>
+      <span class="name" title=${name}>${scope}${shortName(link)}</span>
+      ${this.editing === i
+        ? html`<input class="pin" autofocus .value=${numbers(link.value).map((n) => fixed(n, 6)).join(', ')}
+            @keydown=${(ev: KeyboardEvent) => this.#pinKey(ev, link)} @blur=${() => (this.editing = null)} />`
+        : html`<span class="value" @dblclick=${() => pinnable && (this.editing = i)}>
+            <span class="v" title=${formatValue(link.value)}>${formatValue(link.value)}</span>
+            ${pinnable ? html`<button title="Try another value" @click=${() => (this.editing = i)}>Pin</button>` : nothing}
+            ${numeric && link.expr
+              ? html`<button title="Show this value at every pixel, computed on the GPU"
+                  @click=${() => this.#emit('probe', { expr: link.expr, name: link.name })}>Map</button>`
+              : nothing}
+          </span>`}
+      <span class="detail" title=${link.detail}>${link.detail}</span>
+    </div>`;
   }
 
   #pinKey(ev: KeyboardEvent, link: Link) {
@@ -314,19 +615,24 @@ export class TexelscopeInspector extends LitElement {
   }
 
   #decisions(e: Explanation) {
+    const shown = e.decisions.filter((d) => this.showSettings || !d.setting);
+    const hidden = e.decisions.length - shown.length;
     if (e.decisions.length === 0) return nothing;
     return html`<section>
       <h2>Decisions</h2>
-      ${e.decisions.map(
+      <p class="intro">
+        Each test this pixel made, and how far its inputs were from going the other way. Flip one to see the other
+        side.${hidden > 0 ? ` ${hidden} tests that only read settings are hidden.` : ''}
+      </p>
+      ${shown.map(
         (d) => html`<div class="row decision" @mouseenter=${() => this.#highlight(d.span)}>
           <span class="name" title=${d.condition}>${d.condition}</span>
-          <span class="mono">
+          ${d.expr ? html`<button title="Try the other side" @click=${() => this.#emit('force', { condition: d.expr, taken: !d.taken, label: `${d.condition} forced ${!d.taken}` })}>Flip</button>` : html`<span></span>`}
+          <span class="detail">
             <span class="badge ${d.taken ? 'ok' : ''}">${d.taken ? 'true' : 'false'}</span>
-            ${d.margin !== null ? html`<span class="dim">${fixed(d.margin, 3)} from flipping</span>` : nothing}
-            ${d.count > 1 ? html`<span class="dim">x${d.count}</span>` : nothing}
+            ${d.margin !== null ? `${fixed(d.margin, 3)} from flipping` : ''}${d.count > 1 ? `, ran ${d.count} times` : ''}
             ${d.forced ? html`<span class="badge warn">forced</span>` : nothing}
           </span>
-          ${d.expr ? html`<button title="Try the other side" @click=${() => this.#emit('force', { condition: d.expr, taken: !d.taken, label: `${d.condition} forced ${!d.taken}` })}>Flip</button>` : html`<span></span>`}
         </div>`,
       )}
     </section>`;
@@ -338,8 +644,9 @@ export class TexelscopeInspector extends LitElement {
     const channel = ['#dc2626', '#16a34a', '#2563eb', '#6b7280'];
     return html`<section>
       <h2>Moves the color most</h2>
+      <p class="intro">The inputs that change the color most when nudged. Bars show how much red, green, blue and alpha move.</p>
       ${e.sensitivities.map(
-        (s) => html`<div class="row decision" title="Change in r, g, b, a per unit change of the input">
+        (s) => html`<div class="row sense" title="Change in r, g, b, a per unit change of the input">
           <span class="name">${s.input}</span>
           <span class="dim mono">${fixed(s.value, 3)}</span>
           <span class="bars">${s.dColor.map((d, i) => html`<span style="height: ${Math.max(1, (Math.abs(d) / peak) * 14)}px; color: ${channel[i]}"></span>`)}</span>
@@ -360,6 +667,7 @@ export class TexelscopeInspector extends LitElement {
         Trace, ${trace.steps.length} steps
         <label class="dim"><input type="checkbox" .checked=${!this.namedOnly} @change=${(ev: Event) => (this.namedOnly = !(ev.target as HTMLInputElement).checked)} /> every step</label>
       </h2>
+      <p class="intro">Every step the pixel ran. Pick one, or drag the slider, and the source shows values as of that step.</p>
       <input type="range" min="0" max=${Math.max(0, trace.steps.length - 1)} .value=${String(this.step ?? 0)}
         @input=${(ev: Event) => this.#emit('select-step', Number((ev.target as HTMLInputElement).value))} />
       ${current ? this.#stepDetail(trace, current) : nothing}

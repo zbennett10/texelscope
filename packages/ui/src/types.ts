@@ -71,6 +71,14 @@ export interface Store {
   span: SourceSpan | null;
   depth: number;
   call: number;
+  /** The branch condition step the assignment ran under. */
+  guard?: number;
+}
+
+/** One call of a function, with the step of each argument or null for a constant. */
+export interface Call {
+  function: FunctionRef;
+  args: (number | null)[];
 }
 
 export interface Trace {
@@ -79,6 +87,8 @@ export interface Trace {
   steps: Step[];
   branches: Branch[];
   stores: Store[];
+  /** Every call, the entry point first, indexed by the steps' call numbers. */
+  calls: Call[];
   outputs: { location?: number; builtin?: string; value: Value }[];
   result: number | null;
   resultGuard: number | null;
@@ -96,6 +106,8 @@ export interface Link {
   span: SourceSpan | null;
   expr: ExprRef | null;
   step: number | null;
+  /** Whether it comes only from constants and settings, so every pixel has the same value. */
+  setting: boolean;
 }
 
 export interface Decision {
@@ -106,6 +118,8 @@ export interface Decision {
   expr: ExprRef | null;
   count: number;
   forced: boolean;
+  /** Whether the condition reads only constants and settings, so every pixel goes one way. */
+  setting: boolean;
 }
 
 export interface Sensitivity {
@@ -114,14 +128,55 @@ export interface Sensitivity {
   dColor: [number, number, number, number];
 }
 
+/** One sentence of why a pixel has its color. Code is set off in backticks. */
+export interface Reason {
+  text: string;
+  span: SourceSpan | null;
+}
+
 export interface Explanation {
   pixel: [number, number];
   color: Value;
   discarded: boolean;
+  /** Why the pixel has its color, most telling first. */
+  why: Reason[];
   links: Link[];
   decisions: Decision[];
   sensitivities: Sensitivity[];
   notes: string[];
+}
+
+/** One decision as each of two pixels made it, null where a pixel never made it. */
+export interface DecisionPair {
+  condition: string;
+  span: SourceSpan | null;
+  expr: ExprRef | null;
+  a: boolean | null;
+  b: boolean | null;
+  timesA: number;
+  timesB: number;
+}
+
+/** One named value as each of two pixels computed it. */
+export interface ValuePair {
+  name: string;
+  scope: string | null;
+  span: SourceSpan | null;
+  a: Value | null;
+  b: Value | null;
+}
+
+/** What sets two pixels apart, A being the one selected first. */
+export interface Comparison {
+  a: [number, number];
+  b: [number, number];
+  colorA: Value;
+  colorB: Value;
+  summary: Reason[];
+  decisions: DecisionPair[];
+  values: ValuePair[];
+  whyA: Reason[];
+  whyB: Reason[];
 }
 
 export type Override =
@@ -139,13 +194,25 @@ export interface Layer {
   max: number[];
   evaluations: number;
   reached: number;
+  /** When a pixel computes the value shown, its last, on the same scale as decisions' `order`. */
+  order: number;
+  /** Whether it comes only from constants and settings, so every pixel has the same value. */
+  setting: boolean;
 }
 
 export interface BranchLayer {
   condition: ExprRef;
   span: SourceSpan | null;
+  /** Pixels that only went the true way. */
   taken: number;
+  /** Pixels that only went the false way. */
   notTaken: number;
+  /** Pixels that went both ways, on different iterations. */
+  mixed: number;
+  /** When a pixel first decides it, on the same scale as the layers' `order`. */
+  order: number;
+  /** Whether the condition reads only constants and settings, so every pixel goes one way. */
+  setting: boolean;
 }
 
 export interface RegionData {
@@ -177,6 +244,8 @@ export interface Description {
   }[];
   resources: { group: number; binding: number; name: string; kind: ResourceKind }[];
   stageInputs: { location: number; ty: string; interpolation: string | null; sampling: string | null }[];
+  /** Lines that compute a value when they run, counted from 1. */
+  codeLines: number[];
 }
 
 export const sameExpr = (a: ExprRef | null | undefined, b: ExprRef | null | undefined) =>
