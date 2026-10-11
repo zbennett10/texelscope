@@ -3,7 +3,7 @@
   "private": true,
   "description": "Workspace for the Texelscope web packages",
   "license": "MIT OR Apache-2.0",
-  "workspaces": ["packages/*"],
+  "workspaces": ["packages/sdk", "packages/ui", "packages/vite-plugin", "packages/extension"],
   "engines": { "node": ">=20.19" },
   "scripts": {
     "dev": "npm run dev -w @texelscope/ui",

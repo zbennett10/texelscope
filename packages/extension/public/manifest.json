@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Texelscope",
+  "version": "0.1.0",
+  "description": "Alt-click any pixel of a WebGL2 or WebGPU canvas to see why your shader gave it that color.",
+  "minimum_chrome_version": "111",
+  "action": { "default_title": "Texelscope", "default_popup": "popup.html" },
+  "background": { "service_worker": "background.js" },
+  "permissions": ["activeTab", "scripting"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "content_scripts": [
+    {
+      "matches": ["*://localhost/*", "*://127.0.0.1/*"],
+      "js": ["hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": true
+    },
+    {
+      "matches": ["*://localhost/*", "*://127.0.0.1/*"],
+      "js": ["bridge.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
+  "web_accessible_resources": [{ "resources": ["ui/*"], "matches": ["<all_urls>"] }],
+  "content_security_policy": { "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'" }
+}

@@ -1,0 +1,29 @@
+{
+  "name": "@texelscope/vite",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A Vite plugin that lets you Alt-click any pixel of your app's canvas to debug its shader in Texelscope",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "peerDependencies": {
+    "vite": ">=6"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4"
+  }
+}

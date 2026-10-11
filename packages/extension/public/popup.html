@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Texelscope</title>
+    <style>
+      body { width: 300px; margin: 0; padding: 14px 16px; font: 13px/1.5 system-ui, sans-serif; color: #111827; background: #fff; }
+      h1 { margin: 0 0 6px; font-size: 15px; }
+      p { margin: 0 0 10px; }
+      kbd { padding: 0 4px; border: 1px solid #d1d5db; border-radius: 4px; font: 12px ui-monospace, monospace; }
+      #status { color: #4b5563; }
+      button { width: 100%; padding: 6px 10px; border: 0; border-radius: 6px; background: #be185d; color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+      @media (prefers-color-scheme: dark) {
+        body { color: #f3f4f6; background: #111827; }
+        #status { color: #9ca3af; }
+        kbd { border-color: #4b5563; }
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Texelscope</h1>
+    <p><kbd>Alt</kbd>-click any pixel of a WebGL2 or WebGPU canvas to see why it has its color.</p>
+    <p id="status"></p>
+    <button id="toggle" type="button" hidden></button>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

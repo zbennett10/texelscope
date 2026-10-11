@@ -6,8 +6,25 @@ export const DEFAULT_UI_URL = 'http://localhost:5173/';
 /** The window name the UI tab gets, so a reloaded app finds the same tab again. */
 const WINDOW_NAME = 'texelscope';
 
+/** Where the page's UI is, shared by every copy of the SDK on the page through the global registry. */
+const PAGE_UI = Symbol.for('texelscope.ui');
+type PageScope = { [PAGE_UI]?: () => string | undefined };
+
+/**
+ * Sends captures that name no UI to this one, from every copy of the SDK on the page. The Vite
+ * plugin and the extension call it, so an app's own calls reach the UI they serve.
+ */
+export function setDefaultUi(resolve: () => string | undefined): void {
+  (globalThis as PageScope)[PAGE_UI] = resolve;
+}
+
+/** The UI to use when a call names none. */
+function defaultUi(): string {
+  return (globalThis as PageScope)[PAGE_UI]?.() ?? DEFAULT_UI_URL;
+}
+
 export interface OpenOptions {
-  /** The Texelscope UI to open. */
+  /** The Texelscope UI to open. Defaults to the one the Vite plugin or extension serves, else the dev server's. */
   url?: string;
   /** A pixel to select when the capture opens. */
   pixel?: [number, number];
@@ -24,16 +41,10 @@ let ui: { window: Window; ready: Promise<void> } | undefined;
  * capture. Call it from a page, since workers can't open windows.
  */
 export async function openInTexelscope(capture: Capture, options: OpenOptions = {}): Promise<void> {
-  const url = options.url ?? DEFAULT_UI_URL;
+  const url = options.url ?? defaultUi();
   const origin = new URL(url).origin;
-  if (!ui || ui.window.closed) {
-    // An empty URL finds a tab this page opened before it reloaded, without reloading it.
-    const target = window.open('', WINDOW_NAME);
-    if (!target) throw new Error(`the browser blocked opening ${url}`);
-    const blank = isBlank(target);
-    if (blank) target.location.href = url;
-    ui = { window: target, ready: readyFrom(target, blank ? undefined : origin) };
-  }
+  connectTexelscope(url);
+  if (!ui) throw new Error(`the browser blocked opening ${url}`);
   const timeout = options.timeout ?? 20000;
   try {
     await within(ui.ready, timeout);
@@ -43,6 +54,26 @@ export async function openInTexelscope(capture: Capture, options: OpenOptions = 
   }
   ui.window.postMessage({ type: 'texelscope:capture', capture, pixel: options.pixel }, origin);
   if (options.focus !== false) ui.window.focus();
+}
+
+/** Whether a Texelscope tab this page opened is still open to send to. */
+export function isTexelscopeOpen(): boolean {
+  return ui !== undefined && !ui.window.closed;
+}
+
+/**
+ * Opens the Texelscope UI, or finds the tab already open, without sending anything yet. Call
+ * it while handling a click: browsers only let a page open a window during a user gesture,
+ * and a capture can take longer than that gesture lasts.
+ */
+export function connectTexelscope(url: string = defaultUi()): void {
+  if (ui && !ui.window.closed) return;
+  // An empty URL finds a tab this page opened before it reloaded, without reloading it.
+  const target = window.open('', WINDOW_NAME);
+  if (!target) return;
+  const blank = isBlank(target);
+  if (blank) target.location.href = url;
+  ui = { window: target, ready: readyFrom(target, blank ? undefined : new URL(url).origin) };
 }
 
 /** Whether a window is still the blank page `window.open` makes, rather than a UI tab. */

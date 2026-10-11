@@ -17,6 +17,10 @@
     "./webgl2": {
       "types": "./dist/webgl2/index.d.ts",
       "default": "./dist/webgl2/index.js"
+    },
+    "./auto": {
+      "types": "./dist/auto.d.ts",
+      "default": "./dist/auto.js"
     }
   },
   "files": [

@@ -68,6 +68,17 @@ describe('openInTexelscope', () => {
     tab.closed = true;
   });
 
+  it('sends to the UI the Vite plugin or extension set for the page when a call names none', async () => {
+    const { openInTexelscope, setDefaultUi } = await import('../src/send.js');
+    const { tab, posted } = browser({ loaded: false, answers: true });
+    setDefaultUi(() => 'http://localhost:5180/__texelscope/');
+    await openInTexelscope(capture);
+    delete (globalThis as Record<symbol, unknown>)[Symbol.for('texelscope.ui')];
+    expect(tab.href).toBe('http://localhost:5180/__texelscope/');
+    expect(posted[0]?.origin).toBe('http://localhost:5180');
+    tab.closed = true;
+  });
+
   it('gives up with a hint when the UI never answers', async () => {
     const { openInTexelscope } = await import('../src/send.js');
     browser({ loaded: false, answers: false });
