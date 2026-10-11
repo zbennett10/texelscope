@@ -40,8 +40,16 @@ pub fn validate(capture: &Capture) -> Vec<String> {
         }
     }
     let mut seen = BTreeSet::new();
+    let mut named = BTreeSet::new();
     for binding in &capture.bindings {
-        if !seen.insert((binding.group, binding.binding)) {
+        // A WebGL binding goes by its GLSL name, and a sampler uniform gives a texture and a
+        // sampler under the same name.
+        if let Some(name) = &binding.name {
+            let kind = std::mem::discriminant(&binding.resource);
+            if !named.insert((name.clone(), format!("{kind:?}"))) {
+                problems.push(format!("{name} appears twice"));
+            }
+        } else if !seen.insert((binding.group, binding.binding)) {
             problems.push(format!(
                 "group {} binding {} appears twice",
                 binding.group, binding.binding

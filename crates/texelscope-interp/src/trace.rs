@@ -97,6 +97,18 @@ pub struct Store {
     pub depth: u32,
     /// Which call of its function made the assignment.
     pub call: u32,
+    /// The branch condition step the assignment ran under, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<u32>,
+}
+
+/// One call of a function, numbered as steps' `call` numbers it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Call {
+    pub function: texelscope_ir::FunctionRef,
+    /// The step that computed each argument, or `None` for a constant.
+    pub args: Vec<Option<u32>>,
 }
 
 /// A value the entry point returned.
@@ -119,11 +131,15 @@ pub struct Trace {
     pub steps: Vec<Step>,
     pub branches: Vec<Branch>,
     pub stores: Vec<Store>,
+    /// Every call the invocation made, the entry point first, indexed by call number.
+    #[serde(default)]
+    pub calls: Vec<Call>,
     /// Empty when the invocation discarded.
     pub outputs: Vec<Output>,
     /// The step that produced the entry point's return value.
     pub result: Option<u32>,
-    /// The condition step the entry point returned under, if it returned inside a branch.
+    /// The condition step the entry point returned or discarded under, if it did so inside a
+    /// branch.
     pub result_guard: Option<u32>,
     pub discarded: bool,
     /// Whether recording stopped at the step limit before the invocation ended.

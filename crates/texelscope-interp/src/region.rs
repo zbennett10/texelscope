@@ -43,6 +43,10 @@ pub struct Layer {
     pub evaluations: u32,
     /// Pixels that computed it at least once.
     pub reached: u32,
+    /// When a pixel computes the value shown, its last, on the same scale as decisions' `order`.
+    pub order: u64,
+    /// Whether it comes only from constants and settings, so every pixel has the same value.
+    pub setting: bool,
     /// Four floats per pixel, rows from the top, NaN where a pixel did not compute it.
     #[serde(skip)]
     pub data: Vec<f32>,
@@ -57,8 +61,16 @@ pub struct BranchLayer {
     /// Per pixel: 0 not reached, 1 false, 2 true, 3 both on different iterations.
     #[serde(skip)]
     pub data: Vec<u8>,
+    /// Pixels that only went the true way.
     pub taken: u32,
+    /// Pixels that only went the false way.
     pub not_taken: u32,
+    /// Pixels that went both ways, on different iterations.
+    pub mixed: u32,
+    /// When a pixel first decides it, on the same scale as the layers' `order`.
+    pub order: u64,
+    /// Whether the condition reads only constants and settings, so every pixel goes one way.
+    pub setting: bool,
 }
 
 struct Accumulator {
@@ -138,14 +150,29 @@ pub(crate) fn inspect(
         }
     }
 
-    let mut layers: Vec<Accumulator> = layers.into_values().collect();
-    layers.sort_by_key(|a| a.order);
-    let mut branches: Vec<(BranchLayer, u64)> = branches.into_values().collect();
-    branches.sort_by_key(|(_, order)| *order);
+    let module = &interp.module;
+    let mut layers: Vec<Layer> = layers
+        .into_values()
+        .map(|a| Layer {
+            order: a.order,
+            setting: a.layer.expr.is_some_and(|e| module.is_uniform(e)),
+            ..a.layer
+        })
+        .collect();
+    layers.sort_by_key(|l| l.order);
+    let mut branches: Vec<BranchLayer> = branches
+        .into_values()
+        .map(|(b, order)| BranchLayer {
+            order,
+            setting: module.is_uniform(b.condition),
+            ..b
+        })
+        .collect();
+    branches.sort_by_key(|b| b.order);
     Ok(Region {
         rect,
-        layers: layers.into_iter().map(|a| a.layer).collect(),
-        branches: branches.into_iter().map(|(b, _)| b).collect(),
+        layers,
+        branches,
         colors,
     })
 }
@@ -175,6 +202,8 @@ fn merge(
                 max: [f32::NEG_INFINITY; 4],
                 evaluations: 0,
                 reached: 0,
+                order: 0,
+                setting: false,
                 data: vec![f32::NAN; count * 4],
             },
             order,
@@ -202,6 +231,9 @@ fn merge(
                     data: vec![0; count],
                     taken: 0,
                     not_taken: 0,
+                    mixed: 0,
+                    order: 0,
+                    setting: false,
                 },
                 order,
             )
@@ -214,7 +246,9 @@ fn merge(
         } else {
             1
         };
-        if sample.taken {
+        if sample.mixed {
+            layer.mixed += 1;
+        } else if sample.taken {
             layer.taken += 1;
         } else {
             layer.not_taken += 1;

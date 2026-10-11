@@ -54,7 +54,11 @@ impl Session {
                 "the capture's shader source must be inline in the browser",
             ));
         };
-        let module = ShaderModule::from_wgsl(source.as_str())?;
+        let language = match capture.shader.language {
+            texelscope_capture::Language::Wgsl => texelscope_ir::Language::Wgsl,
+            texelscope_capture::Language::Glsl => texelscope_ir::Language::Glsl,
+        };
+        let module = ShaderModule::from_language(language, source.as_str())?;
         let data = Arc::new(CaptureData::new(capture, None)?);
         let interp = Interpreter::new(Arc::new(module), Arc::clone(&data))?;
         Ok(Session { data, interp })
@@ -71,11 +75,11 @@ impl Session {
         self.interp.module().source().to_string()
     }
 
-    /// Swaps in edited WGSL. Throws the diagnostic when it does not validate, and keeps the
-    /// previous source.
+    /// Swaps in an edited shader in the capture's language. Throws the diagnostic when it does
+    /// not validate, and keeps the previous source.
     #[wasm_bindgen(js_name = setSource)]
     pub fn set_source(&mut self, source: &str) -> Result<String, JsError> {
-        let module = ShaderModule::from_wgsl(source)?;
+        let module = ShaderModule::from_language(self.interp.module().language(), source)?;
         self.interp = Interpreter::new(Arc::new(module), Arc::clone(&self.data))?;
         Ok(self.describe())
     }
@@ -99,6 +103,40 @@ impl Session {
             .interp
             .trace_pixel([x, y], &parse_overrides(overrides)?)?;
         Ok(serde_json::to_string(&trace)?)
+    }
+
+    /// The shader rewritten to output one value at every pixel, as JSON with `wgsl` and
+    /// `components`. `expr` is a JSON expression reference and `overrides` a JSON array.
+    #[wasm_bindgen(js_name = probeSource)]
+    pub fn probe_source(&self, expr: &str, overrides: &str) -> Result<String, JsError> {
+        let expr: texelscope_ir::ExprRef = serde_json::from_str(expr)?;
+        let entry = &self.data.capture().shader.entry_point;
+        let probe = texelscope_rewrite::probe(
+            self.interp.module(),
+            entry,
+            expr,
+            &parse_overrides(overrides)?,
+        )?;
+        Ok(serde_json::to_string(&probe)?)
+    }
+
+    /// What sets two pixels apart, as JSON.
+    #[wasm_bindgen(js_name = comparePixels)]
+    pub fn compare_pixels(
+        &self,
+        ax: u32,
+        ay: u32,
+        bx: u32,
+        by: u32,
+        overrides: &str,
+    ) -> Result<String, JsError> {
+        let comparison = texelscope_explain::compare_pixels(
+            &self.interp,
+            [ax, ay],
+            [bx, by],
+            &parse_overrides(overrides)?,
+        )?;
+        Ok(serde_json::to_string(&comparison)?)
     }
 
     /// The explanation of one pixel as JSON, with sensitivities.
@@ -220,5 +258,6 @@ fn describe(module: &ShaderModule, entry: Option<&str>) -> serde_json::Value {
         "namedValues": module.named_values(),
         "resources": module.resources(),
         "stageInputs": entry.map(|e| module.stage_inputs(e)).unwrap_or_default(),
+        "codeLines": module.code_lines(),
     })
 }

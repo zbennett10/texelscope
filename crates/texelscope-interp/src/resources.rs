@@ -4,8 +4,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
-use texelscope_capture::{Capture, DecodedTexture, Resource, Sampler};
+use texelscope_capture::{Capture, DecodedTexture, FragmentInputs, Rect, Resource, Sampler};
 use texelscope_ir::naga::{self, AddressSpace, Handle, TypeInner};
+use texelscope_ir::{GlslLayout, GlslUniformKind};
 
 use crate::val::Val;
 use crate::{InterpError, layout};
@@ -18,6 +19,21 @@ pub struct CaptureData {
     buffers: HashMap<(u32, u32), BufferSource>,
     textures: HashMap<(u32, u32), Arc<DecodedTexture>>,
     samplers: HashMap<(u32, u32), Sampler>,
+    /// Bindings a WebGL capture gives by GLSL name instead of by number.
+    named_buffers: HashMap<String, BufferSource>,
+    named_textures: HashMap<String, Arc<DecodedTexture>>,
+    named_samplers: HashMap<String, Sampler>,
+    window: Option<Window>,
+}
+
+/// A capture's window inputs, decoded.
+#[derive(Debug)]
+pub(crate) struct Window {
+    pub(crate) rect: Rect,
+    /// Four floats per pixel, rows from the top.
+    pub(crate) frag_coord: Vec<f32>,
+    /// Each input's floats per pixel and values, by name.
+    pub(crate) varyings: HashMap<String, (u32, Vec<f32>)>,
 }
 
 #[derive(Debug)]
@@ -34,8 +50,29 @@ impl CaptureData {
             buffers: HashMap::new(),
             textures: HashMap::new(),
             samplers: HashMap::new(),
+            named_buffers: HashMap::new(),
+            named_textures: HashMap::new(),
+            named_samplers: HashMap::new(),
+            window: None,
         };
+        if let FragmentInputs::Window {
+            rect,
+            frag_coord,
+            varyings,
+        } = &data.capture.inputs
+        {
+            let mut decoded = HashMap::new();
+            for v in varyings {
+                decoded.insert(v.name.clone(), (v.components, floats(&v.data)?));
+            }
+            data.window = Some(Window {
+                rect: *rect,
+                frag_coord: floats(frag_coord)?,
+                varyings: decoded,
+            });
+        }
         for binding in &data.capture.bindings {
+            let name = binding.name.clone();
             let key = (binding.group, binding.binding);
             let context = |e: texelscope_capture::CaptureError| {
                 InterpError::BadData(format!(
@@ -54,14 +91,23 @@ impl CaptureData {
                             _ => unreachable!("only member values have no bytes"),
                         },
                     };
-                    data.buffers.insert(key, source);
+                    match name {
+                        Some(name) => data.named_buffers.insert(name, source),
+                        None => data.buffers.insert(key, source),
+                    };
                 }
                 Resource::Texture(texture) => {
-                    let decoded = texture.decode(base_dir).map_err(context)?;
-                    data.textures.insert(key, Arc::new(decoded));
+                    let decoded = Arc::new(texture.decode(base_dir).map_err(context)?);
+                    match name {
+                        Some(name) => data.named_textures.insert(name, decoded),
+                        None => data.textures.insert(key, decoded),
+                    };
                 }
                 Resource::Sampler(sampler) => {
-                    data.samplers.insert(key, *sampler);
+                    match name {
+                        Some(name) => data.named_samplers.insert(name, *sampler),
+                        None => data.samplers.insert(key, *sampler),
+                    };
                 }
             }
         }
@@ -76,6 +122,35 @@ impl CaptureData {
     pub fn texture(&self, group: u32, binding: u32) -> Option<&DecodedTexture> {
         self.textures.get(&(group, binding)).map(Arc::as_ref)
     }
+
+    pub(crate) fn window(&self) -> Option<&Window> {
+        self.window.as_ref()
+    }
+}
+
+/// Little-endian f32s from base64.
+fn floats(base64: &str) -> Result<Vec<f32>, InterpError> {
+    let bytes = texelscope_capture::decode_base64(base64)
+        .map_err(|e| InterpError::BadData(format!("window inputs: {e}")))?;
+    Ok(bytes
+        .chunks_exact(4)
+        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect())
+}
+
+/// The GLSL name a binding of group 0 was given, for captures that bind by name.
+fn glsl_name(
+    glsl: Option<&GlslLayout>,
+    group: u32,
+    binding: u32,
+    kinds: &[GlslUniformKind],
+) -> Option<String> {
+    let layout = glsl.filter(|_| group == 0)?;
+    layout
+        .uniforms
+        .iter()
+        .find(|u| u.binding == binding && kinds.contains(&u.kind))
+        .map(|u| u.name.clone())
 }
 
 /// What one of the shader's globals resolves to.
@@ -107,6 +182,7 @@ pub(crate) enum Global {
 pub(crate) fn resolve(
     module: &naga::Module,
     data: &CaptureData,
+    glsl: Option<&GlslLayout>,
     constant: &dyn Fn(Handle<naga::Expression>) -> Result<Val, InterpError>,
 ) -> Result<Vec<Global>, InterpError> {
     module
@@ -130,7 +206,12 @@ pub(crate) fn resolve(
             };
             Ok(match var.space {
                 AddressSpace::Uniform | AddressSpace::Storage { .. } => {
-                    match data.buffers.get(&key) {
+                    let named = || {
+                        let kinds = [GlslUniformKind::Value, GlslUniformKind::Block];
+                        glsl_name(glsl, group, binding, &kinds)
+                            .and_then(|n| data.named_buffers.get(&n))
+                    };
+                    match data.buffers.get(&key).or_else(named) {
                         None => missing(format!("the capture has no buffer for {name}")),
                         Some(source) => {
                             let value = match source {
@@ -154,7 +235,10 @@ pub(crate) fn resolve(
                     }
                 }
                 AddressSpace::Handle => match &module.types[var.ty].inner {
-                    TypeInner::Image { .. } => match data.textures.get(&key) {
+                    TypeInner::Image { .. } => match data.textures.get(&key).or_else(|| {
+                        glsl_name(glsl, group, binding, &[GlslUniformKind::Texture])
+                            .and_then(|n| data.named_textures.get(&n))
+                    }) {
                         Some(texture) => Global::Texture {
                             texture: Arc::clone(texture),
                             group,
@@ -162,10 +246,15 @@ pub(crate) fn resolve(
                         },
                         None => missing(format!("the capture has no texture for {name}")),
                     },
-                    TypeInner::Sampler { comparison: false } => match data.samplers.get(&key) {
-                        Some(sampler) => Global::Sampler(*sampler),
-                        None => missing(format!("the capture has no sampler for {name}")),
-                    },
+                    TypeInner::Sampler { comparison: false } => {
+                        match data.samplers.get(&key).or_else(|| {
+                            glsl_name(glsl, group, binding, &[GlslUniformKind::Sampler])
+                                .and_then(|n| data.named_samplers.get(&n))
+                        }) {
+                            Some(sampler) => Global::Sampler(*sampler),
+                            None => missing(format!("the capture has no sampler for {name}")),
+                        }
+                    }
                     other => missing(format!(
                         "{name} is a {other:?}, which is not interpreted yet"
                     )),

@@ -10,8 +10,18 @@ pub enum Override {
     /// Replace an expression's value with a constant. Scrubbing a literal or pinning a
     /// uniform is a pin.
     Pin { expr: ExprRef, value: Value },
-    /// Send the branch whose condition is `condition` down one side.
+    /// Make the condition `condition` come out as `taken` wherever it is used.
     ForceBranch { condition: ExprRef, taken: bool },
     /// Replace an expression with WGSL evaluated in its scope.
     Replace { expr: ExprRef, wgsl: String },
+}
+
+impl Override {
+    /// The expression the override changes.
+    pub fn target(&self) -> ExprRef {
+        match self {
+            Override::Pin { expr, .. } | Override::Replace { expr, .. } => *expr,
+            Override::ForceBranch { condition, .. } => *condition,
+        }
+    }
 }

@@ -7,7 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-naga = { workspace = true, features = ["wgsl-in"] }
+naga = { workspace = true, features = ["wgsl-in", "glsl-in"] }
 serde.workspace = true
 thiserror.workspace = true
 

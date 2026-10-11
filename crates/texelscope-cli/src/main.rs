@@ -73,6 +73,22 @@ enum Command {
         #[arg(long)]
         overrides: Option<PathBuf>,
     },
+    /// Say what sets two pixels of a capture apart.
+    Compare {
+        capture: PathBuf,
+        /// The first pixel as x,y.
+        #[arg(long, value_parser = parse_pixel)]
+        pixel: [u32; 2],
+        /// The pixel to compare it with, as x,y.
+        #[arg(long, value_parser = parse_pixel)]
+        with: [u32; 2],
+        /// Print the comparison as JSON.
+        #[arg(long)]
+        json: bool,
+        /// A JSON file with an array of overrides to apply.
+        #[arg(long)]
+        overrides: Option<PathBuf>,
+    },
     /// Shade every pixel of a capture on the CPU and write a PNG.
     Render {
         capture: PathBuf,
@@ -111,6 +127,13 @@ fn main() -> Result<()> {
             json,
             overrides,
         } => explain(&capture, pixel, json, overrides.as_deref()),
+        Command::Compare {
+            capture,
+            pixel,
+            with,
+            json,
+            overrides,
+        } => compare(&capture, pixel, with, json, overrides.as_deref()),
         Command::Render {
             capture,
             output,
@@ -244,6 +267,41 @@ fn trace(
     Ok(())
 }
 
+fn compare(
+    path: &Path,
+    a: [u32; 2],
+    b: [u32; 2],
+    json: bool,
+    overrides: Option<&Path>,
+) -> Result<()> {
+    let interp = interpreter(path)?;
+    let comparison =
+        texelscope_explain::compare_pixels(&interp, a, b, &load_overrides(overrides)?)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&comparison)?);
+        return Ok(());
+    }
+    println!("A ({}, {}) and B ({}, {})", a[0], a[1], b[0], b[1]);
+    for reason in &comparison.summary {
+        println!("  {}", reason.text);
+    }
+    for d in &comparison.decisions {
+        let side = |v: Option<bool>| v.map_or("not run".to_string(), |v| v.to_string());
+        println!("  {}: A {}, B {}", d.condition, side(d.a), side(d.b));
+    }
+    for v in &comparison.values {
+        let side = |v: &Option<texelscope_ir::Value>| {
+            v.as_ref().map_or("-".to_string(), |v| v.to_string())
+        };
+        let name = v
+            .scope
+            .as_ref()
+            .map_or(v.name.clone(), |s| format!("{s}: {}", v.name));
+        println!("  {name} = {} | {}", side(&v.a), side(&v.b));
+    }
+    Ok(())
+}
+
 fn explain(path: &Path, pixel: [u32; 2], json: bool, overrides: Option<&Path>) -> Result<()> {
     let interp = interpreter(path)?;
     let explanation =
@@ -283,11 +341,12 @@ fn load_shader(path: &Path) -> Result<ShaderModule> {
 /// Loads a capture and checks that its shader has the fragment entry point it names.
 fn load_capture(path: &Path) -> Result<(LoadedCapture, ShaderModule)> {
     let loaded = texelscope_capture::load(path)?;
-    if loaded.capture.shader.language != Language::Wgsl {
-        bail!("only WGSL captures can be replayed so far");
-    }
-    let module = ShaderModule::from_wgsl(loaded.shader_source.clone())
-        .map_err(|e| anyhow!("the capture's shader is not valid WGSL\n\n{e}"))?;
+    let language = match loaded.capture.shader.language {
+        Language::Wgsl => texelscope_ir::Language::Wgsl,
+        Language::Glsl => texelscope_ir::Language::Glsl,
+    };
+    let module = ShaderModule::from_language(language, loaded.shader_source.clone())
+        .map_err(|e| anyhow!("the capture's shader does not validate\n\n{e}"))?;
     let name = &loaded.capture.shader.entry_point;
     match module.entry_point(name) {
         Some(ep) if ep.stage == Stage::Fragment => Ok((loaded, module)),

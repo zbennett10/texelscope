@@ -52,6 +52,12 @@ pub fn render_text(explanation: &Explanation) -> String {
         color(&explanation.color)
     };
     let mut out = format!("pixel ({x}, {y}) = {shown}\n");
+    for reason in &explanation.why {
+        let _ = writeln!(out, "  {}", reason.text);
+    }
+    if !explanation.why.is_empty() {
+        out.push('\n');
+    }
     for note in &explanation.notes {
         let _ = writeln!(out, "  note: {note}");
     }
@@ -80,7 +86,7 @@ fn color(value: &Value) -> String {
 }
 
 /// Up to three decimals, without trailing zeros.
-fn number(value: f64) -> String {
+pub(crate) fn number(value: f64) -> String {
     let fixed = format!("{value:.3}");
     fixed
         .trim_end_matches('0')
@@ -107,6 +113,7 @@ mod tests {
             span: None,
             expr: None,
             step: None,
+            setting: false,
         };
         let sensitivity = |input: &str, d_color: [f64; 4]| Sensitivity {
             input: input.to_string(),
@@ -115,6 +122,7 @@ mod tests {
             perturbation: None,
         };
         let explanation = Explanation {
+            why: Vec::new(),
             pixel: [128, 64],
             color: rgba([0.95, 0.85, 0.1, 0.8]),
             discarded: false,
@@ -130,6 +138,7 @@ mod tests {
                 expr: None,
                 count: 1,
                 forced: false,
+                setting: false,
             }],
             sensitivities: vec![
                 sensitivity("params.opacity", [0.0, 0.0, 0.0, 1.0]),

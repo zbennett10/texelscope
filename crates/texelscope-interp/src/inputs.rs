@@ -71,11 +71,13 @@ fn bound_value(
     let module = interp.module.naga();
     let target = interp.capture().target;
     let (label, location, mut lanes): (String, Option<u32>, Vec<f32>) = match *binding {
-        Binding::BuiltIn(BuiltIn::Position { .. }) => (
-            "position".into(),
-            None,
-            vec![pixel[0] as f32 + 0.5, pixel[1] as f32 + 0.5, 0.0, 1.0],
-        ),
+        Binding::BuiltIn(BuiltIn::Position { .. }) => {
+            let lanes = match interp.data.window() {
+                Some(window) => window_at(window, pixel, &window.frag_coord, 4)?,
+                None => vec![pixel[0] as f32 + 0.5, pixel[1] as f32 + 0.5, 0.0, 1.0],
+            };
+            ("position".into(), None, lanes)
+        }
         Binding::BuiltIn(BuiltIn::FrontFacing) => {
             return Ok((Val::Scalar(Scalar::Bool(true)), "front_facing".into(), None));
         }
@@ -97,12 +99,32 @@ fn bound_value(
             ..
         } => {
             let label = format!("location({location})");
+            if let Some(window) = interp.data.window() {
+                let name = interp
+                    .module
+                    .glsl_layout()
+                    .and_then(|l| l.inputs.iter().find(|i| i.location == location))
+                    .map(|i| i.name.clone());
+                let Some((name, (components, values))) =
+                    name.and_then(|n| window.varyings.get(&n).map(|v| (n, v)))
+                else {
+                    notes.push(format!(
+                        "the capture gives no values for location({location}), so it reads zero"
+                    ));
+                    return Ok((Val::zero(module, ty)?, label, Some(location)));
+                };
+                let lanes = window_at(window, pixel, values, *components)?;
+                if lanes.iter().any(|v| v.is_nan()) {
+                    notes.push("the draw didn't cover this pixel, so its inputs are NaN".into());
+                }
+                return Ok((shape(module, ty, &lanes)?, name, Some(location)));
+            }
             let corners = match &interp.capture().inputs {
                 FragmentInputs::Fullscreen { locations } => locations
                     .iter()
                     .find(|l| l.location == location)
                     .map(|l| &l.corners),
-                FragmentInputs::Builtins => None,
+                FragmentInputs::Builtins | FragmentInputs::Window { .. } => None,
             };
             let Some(corners) = corners else {
                 notes.push(format!(
@@ -206,4 +228,30 @@ fn builtin_name(builtin: BuiltIn) -> String {
         BuiltIn::SampleMask => "sample_mask".into(),
         other => format!("{other:?}"),
     }
+}
+
+/// The floats a window input holds at a pixel. A quad neighbor just outside the window reads
+/// the nearest pixel inside it.
+fn window_at(
+    window: &crate::resources::Window,
+    pixel: [u32; 2],
+    values: &[f32],
+    components: u32,
+) -> Result<Vec<f32>, InterpError> {
+    let r = window.rect;
+    let (x, y) = (i64::from(pixel[0]), i64::from(pixel[1]));
+    let (x0, y0) = (i64::from(r.x), i64::from(r.y));
+    let (x1, y1) = (x0 + i64::from(r.width) - 1, y0 + i64::from(r.height) - 1);
+    if x < x0 - 1 || x > x1 + 1 || y < y0 - 1 || y > y1 + 1 {
+        return Err(InterpError::BadData(format!(
+            "pixel ({}, {}) is outside the {} by {} window at ({}, {}) the capture recorded",
+            pixel[0], pixel[1], r.width, r.height, r.x, r.y
+        )));
+    }
+    let n = components as usize;
+    let at = ((y.clamp(y0, y1) - y0) * i64::from(r.width) + (x.clamp(x0, x1) - x0)) as usize * n;
+    values
+        .get(at..at + n)
+        .map(<[f32]>::to_vec)
+        .ok_or_else(|| InterpError::BadData("window inputs are shorter than their window".into()))
 }

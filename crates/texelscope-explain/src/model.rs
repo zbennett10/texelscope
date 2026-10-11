@@ -9,6 +9,9 @@ pub struct Explanation {
     pub pixel: [u32; 2],
     pub color: Value,
     pub discarded: bool,
+    /// Why the pixel has its color, in a few sentences, most telling first.
+    #[serde(default)]
+    pub why: Vec<Reason>,
     /// From the inputs to the color, in the order the shader computed them.
     pub links: Vec<Link>,
     /// Decisions on the way, in the order the shader made them.
@@ -49,6 +52,9 @@ pub struct Link {
     pub expr: Option<ExprRef>,
     /// The trace step that computed it.
     pub step: Option<u32>,
+    /// Whether it comes only from constants and settings, so every pixel has the same value.
+    #[serde(default)]
+    pub setting: bool,
 }
 
 /// A branch condition and how it went.
@@ -65,6 +71,9 @@ pub struct Decision {
     /// How many times the pixel decided it, such as once per loop iteration.
     pub count: u32,
     pub forced: bool,
+    /// Whether the condition reads only constants and settings, so every pixel goes one way.
+    #[serde(default)]
+    pub setting: bool,
 }
 
 /// How strongly one input moves the output color.
@@ -77,4 +86,66 @@ pub struct Sensitivity {
     /// Change in each color channel per unit change of the input.
     pub d_color: [f64; 4],
     pub perturbation: Option<Perturbation>,
+}
+
+/// One sentence of the account of why a pixel has its color. Code is set off in backticks.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Reason {
+    pub text: String,
+    /// The code the sentence is about.
+    pub span: Option<SourceSpan>,
+}
+
+impl Reason {
+    pub(crate) fn at(span: Option<SourceSpan>, text: String) -> Self {
+        Self { text, span }
+    }
+}
+
+/// What sets two pixels apart, A being the one selected first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Comparison {
+    pub a: [u32; 2],
+    pub b: [u32; 2],
+    pub color_a: Value,
+    pub color_b: Value,
+    /// What sets them apart, most telling first.
+    pub summary: Vec<Reason>,
+    /// Decisions that went differently or ran in one pixel only, in the order A made them.
+    pub decisions: Vec<DecisionPair>,
+    /// Named values on the way to each color, from the data to the color.
+    pub values: Vec<ValuePair>,
+    /// Why each pixel has its color.
+    pub why_a: Vec<Reason>,
+    pub why_b: Vec<Reason>,
+}
+
+/// One decision as each of two pixels made it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecisionPair {
+    pub condition: String,
+    pub span: Option<SourceSpan>,
+    /// The condition, for flipping it.
+    pub expr: Option<ExprRef>,
+    /// How it went for each pixel, or `None` where that pixel never made it.
+    pub a: Option<bool>,
+    pub b: Option<bool>,
+    /// How many times each pixel made it.
+    pub times_a: u32,
+    pub times_b: u32,
+}
+
+/// One named value as each of two pixels computed it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ValuePair {
+    pub name: String,
+    /// The function it was computed in, when not the entry point.
+    pub scope: Option<String>,
+    pub span: Option<SourceSpan>,
+    pub a: Option<Value>,
+    pub b: Option<Value>,
 }

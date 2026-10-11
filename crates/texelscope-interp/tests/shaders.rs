@@ -5,7 +5,7 @@ use std::sync::Arc;
 use serde_json::json;
 use texelscope_capture::Rect;
 use texelscope_interp::{BranchKind, CaptureData, Interpreter, Origin, Perturbation};
-use texelscope_ir::{ExprRef, FunctionRef, Override, ShaderModule, Value};
+use texelscope_ir::{ExprRef, FunctionRef, Override, ShaderModule, Value, naga};
 
 /// A 4x4 target with the given bindings and the shader's `fs` entry point.
 fn interp(wgsl: &str, bindings: serde_json::Value) -> Interpreter {
@@ -393,4 +393,192 @@ fn rejects_overrides_for_expressions_that_do_not_exist() {
         value: Value::F32(1.0),
     };
     assert!(shader.trace_pixel([0, 0], &[bogus]).is_err());
+}
+
+/// The expression behind the step called `name`.
+fn expr_named(trace: &texelscope_interp::Trace, name: &str) -> ExprRef {
+    trace
+        .steps
+        .iter()
+        .find(|s| s.name.as_deref() == Some(name))
+        .unwrap_or_else(|| panic!("no step named {name}"))
+        .expr
+}
+
+/// Parameter `index` of the shader's first function that is not an entry point.
+fn parameter(wgsl: &str, index: u32) -> ExprRef {
+    let module = ShaderModule::from_wgsl(wgsl).unwrap();
+    let function = FunctionRef::Function(0);
+    let (_, f) = module.function(function).unwrap();
+    let expr = f
+        .expressions
+        .iter()
+        .position(|(_, e)| matches!(e, naga::Expression::FunctionArgument(i) if *i == index))
+        .unwrap();
+    ExprRef {
+        function,
+        expr: expr as u32,
+    }
+}
+
+#[test]
+fn pins_parameters_and_call_results() {
+    let wgsl = "fn half_of(t: f32) -> f32 { return t * 0.5; }
+        @fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+            let h = half_of(pos.x);
+            return vec4<f32>(h, half_of(2.0), pos.y, 1.0);
+        }";
+    let shader = interp(wgsl, json!([]));
+    let trace = shader.trace_pixel([1, 2], &[]).unwrap();
+    let shade = |expr, value| {
+        let pin = [Override::Pin { expr, value }];
+        shader
+            .shade_pixel([1, 2], &pin, None)
+            .unwrap()
+            .color()
+            .unwrap()
+    };
+    approx(color(&shader, [1, 2]), [0.75, 1.0, 2.5, 1.0]);
+    approx(
+        shade(expr_named(&trace, "h"), Value::F32(9.0)),
+        [9.0, 1.0, 2.5, 1.0],
+    );
+    approx(
+        shade(parameter(wgsl, 0), Value::F32(4.0)),
+        [2.0, 2.0, 2.5, 1.0],
+    );
+    let moved = Value::Vector([8.0, 6.0, 0.0, 1.0].map(Value::F32).to_vec());
+    approx(
+        shade(expr_named(&trace, "pos"), moved),
+        [4.0, 1.0, 6.0, 1.0],
+    );
+}
+
+#[test]
+fn flips_a_condition_wherever_it_is_used() {
+    let shader = interp(
+        "@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+            let right = pos.x > 2.0;
+            var g = 0.0;
+            if (!right) { g = 1.0; }
+            return vec4<f32>(select(0.0, 1.0, right), g, 0.0, 1.0);
+        }",
+        json!([]),
+    );
+    let trace = shader.trace_pixel([3, 0], &[]).unwrap();
+    let flipped = [Override::ForceBranch {
+        condition: expr_named(&trace, "right"),
+        taken: false,
+    }];
+    approx(
+        shader
+            .shade_pixel([3, 0], &flipped, None)
+            .unwrap()
+            .color()
+            .unwrap(),
+        [0.0, 1.0, 0.0, 1.0],
+    );
+}
+
+#[test]
+fn orders_region_cards_and_marks_settings() {
+    let shader = interp(
+        "@group(0) @binding(0) var<uniform> n: vec4<f32>;
+        @fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+            let scale = n.x * 2.0;
+            let x = pos.x * scale;
+            var steps = 0;
+            loop {
+                if (f32(steps) >= x) { break; }
+                steps += 1;
+            }
+            let lit = n.y > 0.5;
+            let right = x > 3.0;
+            return vec4<f32>(select(0.0, 1.0, lit), select(0.0, 1.0, right), f32(steps), 1.0);
+        }",
+        numbers("vec4<f32>", json!([1.0, 0.0, 0.0, 0.0])),
+    );
+    let rect = Rect {
+        x: 0,
+        y: 0,
+        width: 4,
+        height: 1,
+    };
+    let region = shader.inspect_region(rect, &[], None).unwrap();
+    let layer = |name: &str| region.layers.iter().find(|l| l.name == name).unwrap();
+    let branch = |text: &str| {
+        region
+            .branches
+            .iter()
+            .find(|b| b.span.is_some_and(|s| shader.module().text(s) == text))
+            .unwrap_or_else(|| panic!("no decision {text}"))
+    };
+    assert!(layer("scale").setting);
+    assert!(!layer("x").setting);
+    assert!(branch("n.y > 0.5").setting);
+    assert!(!branch("x > 3.0").setting);
+    // A decision sits between the values computed before and after it.
+    let exit = branch("f32(steps) >= x");
+    assert!(layer("x").order < exit.order && exit.order < layer("lit").order);
+    // x is 1, 3, 5 and 7, so every pixel goes round at least once before it leaves.
+    assert_eq!((exit.taken, exit.not_taken, exit.mixed), (0, 0, 4));
+    assert_eq!(exit.data, [3, 3, 3, 3]);
+}
+
+/// Little-endian f32s as base64, as a WebGL capture packs them.
+fn packed(values: &[f32]) -> String {
+    let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+    texelscope_capture::encode_base64(&bytes)
+}
+
+#[test]
+fn runs_a_webgl_capture_of_glsl_es() {
+    let glsl = "#version 300 es
+precision highp float;
+uniform float u_scale;
+uniform sampler2D u_tex;
+layout(std140) uniform Params { vec2 offset; } params;
+in vec2 v_uv;
+out vec4 color;
+void main() {
+    float level = v_uv.x * u_scale + params.offset.y;
+    float slope = dFdy(gl_FragCoord.y);
+    color = vec4(level, texelFetch(u_tex, ivec2(1, 0), 0).r, slope, 1.0);
+}
+";
+    // WebGL counts window y up, so the top row of a 4 by 4 target is y = 3.5.
+    let (mut frag, mut uv) = (Vec::new(), Vec::new());
+    for y in 0..4 {
+        for x in 0..4 {
+            frag.extend([x as f32 + 0.5, 3.5 - y as f32, 0.5, 1.0]);
+            uv.extend([x as f32 / 4.0, y as f32 / 4.0]);
+        }
+    }
+    let capture = json!({
+        "version": 0,
+        "shader": { "language": "glsl", "source": { "inline": glsl }, "entryPoint": "main" },
+        "target": { "width": 4, "height": 4, "format": "rgba8unorm", "yUp": true },
+        "inputs": {
+            "kind": "window", "rect": { "x": 0, "y": 0, "width": 4, "height": 4 },
+            "fragCoord": packed(&frag),
+            "varyings": [{ "name": "v_uv", "components": 2, "data": packed(&uv) }]
+        },
+        "bindings": [
+            { "group": 0, "binding": 0, "name": "u_scale", "resource": {
+                "kind": "uniform", "data": { "values": { "u_scale": 2.0 } } } },
+            { "group": 0, "binding": 0, "name": "u_tex", "resource": {
+                "kind": "texture", "dimension": "2d", "format": "r32float", "size": [2, 1, 1],
+                "data": { "inline": [10.0, 20.0] } } },
+            { "group": 0, "binding": 0, "name": "u_tex", "resource": { "kind": "sampler" } },
+            { "group": 0, "binding": 0, "name": "Params", "resource": {
+                "kind": "uniform", "data": { "base64": packed(&[0.0, 0.25, 0.0, 0.0]) } } }
+        ],
+    });
+    let capture = texelscope_capture::parse(&capture.to_string()).unwrap_or_else(|e| panic!("{e}"));
+    let module = ShaderModule::from_glsl(glsl).unwrap_or_else(|e| panic!("{e}"));
+    let data = CaptureData::new(capture, None).unwrap();
+    let shader =
+        Interpreter::new(Arc::new(module), Arc::new(data)).unwrap_or_else(|e| panic!("{e}"));
+    // At pixel (1, 2) the uv is (0.25, 0.5), so level is 0.25 * 2 + 0.25.
+    approx(color(&shader, [1, 2]), [0.75, 20.0, 1.0, 1.0]);
 }

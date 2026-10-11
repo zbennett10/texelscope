@@ -60,6 +60,8 @@ pub(crate) struct Compiled {
     pub(crate) spans: Vec<Option<SourceSpan>>,
     /// The `let` name of each expression that has one.
     pub(crate) names: Vec<Option<Arc<str>>>,
+    /// The expression for each parameter.
+    pub(crate) arguments: Vec<Option<Handle<Expression>>>,
     /// Whether the function takes derivatives.
     pub(crate) uses_quads: bool,
     /// The unnamed locals naga uses to short-circuit `&&` and `||`, with what they hold.
@@ -95,6 +97,14 @@ pub(crate) fn compile(
     for (handle, name) in f.named_expressions.iter() {
         names[handle.index()] = Some(Arc::from(name.as_str()));
     }
+    let mut arguments = vec![None; f.arguments.len()];
+    for (handle, e) in f.expressions.iter() {
+        if let Expression::FunctionArgument(i) = *e
+            && let Some(slot) = arguments.get_mut(i as usize)
+        {
+            *slot = Some(handle);
+        }
+    }
     let uses_quads = f.expressions.iter().any(|(_, e)| match e {
         Expression::Derivative { .. } => true,
         Expression::ImageSample { level, .. } => {
@@ -112,6 +122,7 @@ pub(crate) fn compile(
         handles,
         spans,
         names,
+        arguments,
         uses_quads,
         logical: builder.logical,
     }

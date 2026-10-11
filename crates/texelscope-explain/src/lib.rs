@@ -1,13 +1,18 @@
 //! Explanations of traced pixels. Each one gives the chain from inputs to color, the
 //! branches that decided it and the inputs that move it most.
 
+mod compare;
 mod model;
 mod sensitivity;
 mod text;
+mod why;
 
 use std::collections::{BTreeSet, HashMap};
 
-pub use model::{Decision, Explanation, Link, LinkKind, Sensitivity};
+pub use compare::{compare, compare_pixels};
+pub use model::{
+    Comparison, Decision, DecisionPair, Explanation, Link, LinkKind, Reason, Sensitivity, ValuePair,
+};
 pub use text::render_text;
 
 use texelscope_interp::{BranchKind, Interpreter, Origin, Trace};
@@ -74,6 +79,7 @@ pub fn explain(module: &ShaderModule, trace: &Trace) -> Explanation {
                     span: step.span,
                     expr: Some(step.expr),
                     step: Some(index),
+                    setting: module.is_uniform(step.expr),
                 },
             );
         } else if let Some(name) = &step.name {
@@ -93,6 +99,7 @@ pub fn explain(module: &ShaderModule, trace: &Trace) -> Explanation {
                     span: step.span,
                     expr: Some(step.expr),
                     step: Some(index),
+                    setting: module.is_uniform(step.expr),
                 },
             );
         }
@@ -114,8 +121,10 @@ pub fn explain(module: &ShaderModule, trace: &Trace) -> Explanation {
                 value: store.value.clone(),
                 detail: format!("assigned {}", source(module, store.span)),
                 span: store.span,
-                expr: None,
+                // The value assigned, so it can be shown over the image or pinned.
+                expr: trace.steps.get(step as usize).map(|s| s.expr),
                 step: Some(step),
+                setting: false,
             },
         );
     }
@@ -125,6 +134,7 @@ pub fn explain(module: &ShaderModule, trace: &Trace) -> Explanation {
         pixel: trace.pixel,
         color: trace.color().cloned().unwrap_or(Value::Vector(Vec::new())),
         discarded: trace.discarded,
+        why: why::why(module, trace),
         links: links.into_iter().map(|(_, link)| link).collect(),
         decisions: decisions(module, trace),
         sensitivities: Vec::new(),
@@ -164,6 +174,7 @@ fn decisions(module: &ShaderModule, trace: &Trace) -> Vec<Decision> {
             expr: Some(branch.condition),
             count: 1,
             forced: branch.forced,
+            setting: module.is_uniform(branch.condition),
         };
         match index.get(&branch.condition) {
             Some(&i) => {

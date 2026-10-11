@@ -182,6 +182,7 @@ impl<'a> Lane<'a> {
                     span,
                     depth,
                     call,
+                    guard,
                 },
                 &stored,
                 step,

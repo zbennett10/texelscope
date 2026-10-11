@@ -28,6 +28,12 @@ pub(crate) struct Overrides {
     pub(crate) branches: HashMap<(FunctionRef, u32), bool>,
 }
 
+impl Overrides {
+    fn is_empty(&self) -> bool {
+        self.pins.is_empty() && self.branches.is_empty()
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum State {
     Running,
@@ -134,24 +140,26 @@ impl<'a> Lane<'a> {
             crate::inputs::entry_arguments(interp, self.pixel, self.nudge, &mut self.notes)?;
         let compiled = interp.entry_compiled();
         let ir = interp.entry_ir();
-        self.push_frame(compiled, ir, args, Vec::new(), None, None)?;
+        let count = args.len();
+        self.push_frame(compiled, ir, args, vec![NO_STEP; count], None, None)?;
         // Inputs become the first steps, so values computed from them link back.
-        let mut arg_steps = vec![NO_STEP; origins.len()];
         for (index, origin) in origins.into_iter().enumerate() {
-            let Some(handle) = ir.expressions.iter().find_map(|(h, e)| {
-                matches!(e, Expression::FunctionArgument(i) if *i as usize == index).then_some(h)
-            }) else {
+            let Some(handle) = compiled.arguments.get(index).copied().flatten() else {
                 continue;
             };
+            if self.overridden(handle).is_some() {
+                continue;
+            }
             let value = self.frames[0].args[index].clone();
             let extra = Extra {
                 origin: Some(origin),
                 inputs: Some(Vec::new()),
                 note: None,
             };
-            arg_steps[index] = self.record_step(handle, &value, extra);
+            self.frames[0].arg_steps[index] = self.record_step(handle, &value, extra);
         }
-        self.frames[0].arg_steps = arg_steps;
+        self.override_arguments();
+        self.record_call();
         Ok(())
     }
 
@@ -223,6 +231,7 @@ impl<'a> Lane<'a> {
                     self.finish_call(*value)?
                 }
                 Op::Kill => {
+                    self.result_guard = self.guard_at(pc);
                     self.discarded = true;
                     self.frames.clear();
                 }
@@ -334,16 +343,7 @@ impl<'a> Lane<'a> {
     /// wait for its quad.
     fn emit(&mut self, handle: Handle<Expression>) -> Result<Option<Val>, InterpError> {
         self.tick()?;
-        let function = self.top().compiled.function;
-        if !self.overrides.pins.is_empty()
-            && let Some(pinned) = self.overrides.pins.get(&(function, handle.index() as u32))
-        {
-            let value = pinned.clone();
-            let extra = Extra {
-                note: Some("pinned".to_string()),
-                inputs: Some(Vec::new()),
-                ..Extra::default()
-            };
+        if let Some((value, extra)) = self.overridden(handle) {
             self.set(handle, value, extra);
             return Ok(None);
         }
@@ -353,6 +353,53 @@ impl<'a> Lane<'a> {
                 Ok(None)
             }
             Computed::Wait(operand) => Ok(Some(operand)),
+        }
+    }
+
+    /// The value an override gives an expression of the top frame. A forced condition is
+    /// pinned like any value, so every use of it sees the same side.
+    fn overridden(&self, handle: Handle<Expression>) -> Option<(Val, Extra)> {
+        if self.overrides.is_empty() {
+            return None;
+        }
+        let key = (self.top().compiled.function, handle.index() as u32);
+        let (value, note) = match self.overrides.pins.get(&key) {
+            Some(value) => (value.clone(), "pinned"),
+            None => {
+                let taken = *self.overrides.branches.get(&key)?;
+                (Val::Scalar(Scalar::Bool(taken)), "forced")
+            }
+        };
+        let extra = Extra {
+            note: Some(note.to_string()),
+            inputs: Some(Vec::new()),
+            ..Extra::default()
+        };
+        Some((value, extra))
+    }
+
+    /// Notes the top frame's call with the steps of its arguments.
+    fn record_call(&mut self) {
+        let frame = self.top();
+        let (function, args) = (frame.compiled.function, frame.arg_steps.clone());
+        self.record.call(function, &args, NO_STEP);
+    }
+
+    /// Gives the top frame's overridden parameters their values.
+    fn override_arguments(&mut self) {
+        if self.overrides.is_empty() {
+            return;
+        }
+        let compiled = self.top().compiled;
+        for (index, &handle) in compiled.arguments.iter().enumerate() {
+            let Some(handle) = handle else { continue };
+            let Some((value, extra)) = self.overridden(handle) else {
+                continue;
+            };
+            let step = self.record_step(handle, &value, extra);
+            let frame = self.top_mut();
+            frame.args[index] = value;
+            frame.arg_steps[index] = step;
         }
     }
 
@@ -400,6 +447,14 @@ impl<'a> Lane<'a> {
         result: Option<Handle<Expression>>,
         pc: usize,
     ) -> Result<(), InterpError> {
+        // The patched source drops a pinned call, so the function doesn't run.
+        if let Some(result) = result
+            && let Some((value, extra)) = self.overridden(result)
+        {
+            self.set(result, value, extra);
+            self.top_mut().pc += 1;
+            return Ok(());
+        }
         let args = arguments
             .iter()
             .map(|&a| self.owned(a))
@@ -412,7 +467,10 @@ impl<'a> Lane<'a> {
         self.top_mut().pc += 1;
         let compiled = self.interp.function_compiled(function);
         let ir = &self.module().functions[function];
-        self.push_frame(compiled, ir, args, arg_steps, guard, result)
+        self.push_frame(compiled, ir, args, arg_steps, guard, result)?;
+        self.override_arguments();
+        self.record_call();
+        Ok(())
     }
 
     fn finish_call(&mut self, value: Option<Handle<Expression>>) -> Result<(), InterpError> {

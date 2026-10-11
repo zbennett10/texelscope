@@ -46,6 +46,8 @@ pub(crate) struct StoreTarget {
     pub(crate) span: Option<SourceSpan>,
     pub(crate) depth: u32,
     pub(crate) call: u32,
+    /// The condition step the assignment ran under, if any.
+    pub(crate) guard: Option<u32>,
 }
 
 impl Record {
@@ -147,6 +149,7 @@ impl Record {
                     span: target.span,
                     depth: target.depth,
                     call: target.call,
+                    guard: target.guard,
                 });
             }
             Self::Layers(sink) => {
@@ -164,11 +167,22 @@ impl Record {
     }
 }
 
+impl Record {
+    /// Notes a call and the steps of its arguments, in call number order.
+    pub(crate) fn call(&mut self, function: FunctionRef, args: &[u32], none: u32) {
+        if let Self::Trace(trace) = self {
+            let args = args.iter().map(|&a| (a != none).then_some(a)).collect();
+            trace.calls.push(crate::trace::Call { function, args });
+        }
+    }
+}
+
 /// Builds a [`crate::Trace`].
 pub(crate) struct TraceBuilder {
     pub(crate) steps: Vec<Step>,
     pub(crate) branches: Vec<Branch>,
     pub(crate) stores: Vec<Store>,
+    pub(crate) calls: Vec<crate::trace::Call>,
     pub(crate) limit: usize,
     pub(crate) truncated: bool,
 }
@@ -179,6 +193,7 @@ impl TraceBuilder {
             steps: Vec::new(),
             branches: Vec::new(),
             stores: Vec::new(),
+            calls: Vec::new(),
             limit,
             truncated: false,
         }
@@ -203,7 +218,7 @@ pub(crate) struct LayerSample {
     pub(crate) lanes: [f32; 4],
     pub(crate) components: u8,
     pub(crate) count: u32,
-    /// When the value was first computed, for listing layers in execution order.
+    /// When the value shown, the last one, was computed, for listing layers in that order.
     pub(crate) order: u32,
 }
 
@@ -291,6 +306,9 @@ impl LayerSink {
         });
         entry.lanes = packed;
         entry.count += 1;
+        // A later assignment or loop pass replaces the value, so the layer sits where it did.
+        entry.order = order;
+        entry.span = span;
     }
 
     fn branch(&mut self, condition: ExprRef, taken: bool, span: Option<SourceSpan>) {

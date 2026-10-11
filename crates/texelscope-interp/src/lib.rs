@@ -25,7 +25,7 @@ use texelscope_ir::{ExprRef, FunctionRef, Override, ShaderModule, Stage, Value};
 
 pub use region::{BranchLayer, Layer, Region};
 pub use resources::CaptureData;
-pub use trace::{Branch, BranchKind, Origin, Output, Step, Store, Trace};
+pub use trace::{Branch, BranchKind, Call, Origin, Output, Step, Store, Trace};
 
 use crate::lane::{Lane, Overrides, State};
 use crate::program::Compiled;
@@ -199,7 +199,9 @@ impl Interpreter {
         for (_, constant) in naga.constants.iter() {
             constants.push(eval_global(naga, constant.init, &constants)?);
         }
-        let globals = resources::resolve(naga, &data, &|init| eval_global(naga, init, &constants))?;
+        let globals = resources::resolve(naga, &data, module.glsl_layout(), &|init| {
+            eval_global(naga, init, &constants)
+        })?;
         Ok(Self {
             entry: entry as usize,
             entry_compiled,
@@ -250,6 +252,7 @@ impl Interpreter {
             steps: builder.steps,
             branches: builder.branches,
             stores: builder.stores,
+            calls: builder.calls,
             outputs: outputs(module, &lane.outputs, lane.discarded),
             result: lane.result_step,
             result_guard: lane.result_guard,
@@ -423,16 +426,26 @@ impl Interpreter {
         let mut overrides = Overrides::default();
         for o in list {
             match o {
+                // The last override of an expression wins, as in the patched source.
                 Override::Pin { expr, value } => {
                     let inner = self.expr_type(*expr)?;
                     let value = Val::from_value(naga, value, inner)?;
-                    overrides.pins.insert((expr.function, expr.expr), value);
+                    let key = (expr.function, expr.expr);
+                    overrides.branches.remove(&key);
+                    overrides.pins.insert(key, value);
                 }
                 Override::ForceBranch { condition, taken } => {
-                    self.expr_type(*condition)?;
-                    overrides
-                        .branches
-                        .insert((condition.function, condition.expr), *taken);
+                    let inner = self.expr_type(*condition)?;
+                    if !matches!(inner, naga::TypeInner::Scalar(s) if s.kind == naga::ScalarKind::Bool)
+                    {
+                        return Err(InterpError::Override(format!(
+                            "expression {} is not a condition, so it can't be flipped",
+                            condition.expr
+                        )));
+                    }
+                    let key = (condition.function, condition.expr);
+                    overrides.pins.remove(&key);
+                    overrides.branches.insert(key, *taken);
                 }
                 Override::Replace { .. } => {
                     return Err(InterpError::Override(
@@ -503,7 +516,24 @@ impl Interpreter {
     ) -> String {
         let naga = self.module.naga();
         let var = &naga.global_variables[global];
-        lane::path_label(naga, var.name.as_deref().unwrap_or("_"), var.ty, path)
+        let name = var.name.as_deref().unwrap_or("_");
+        // A loose GLSL uniform sits alone in a block of its own, which the label leaves out.
+        let loose = self.module.glsl_layout().is_some_and(|layout| {
+            layout.uniforms.iter().any(|u| {
+                u.kind == texelscope_ir::GlslUniformKind::Value
+                    && var
+                        .binding
+                        .as_ref()
+                        .is_some_and(|b| b.group == 0 && b.binding == u.binding)
+            })
+        });
+        if let (true, Some((&first, rest))) = (loose, path.split_first())
+            && let naga::TypeInner::Struct { members, .. } = &naga.types[var.ty].inner
+            && let Some(member) = members.get(first as usize)
+        {
+            return lane::path_label(naga, name, member.ty, rest);
+        }
+        lane::path_label(naga, name, var.ty, path)
     }
 
     pub(crate) fn global_error(

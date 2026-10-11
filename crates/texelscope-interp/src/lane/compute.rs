@@ -249,7 +249,12 @@ impl<'a> Lane<'a> {
         };
         let dy = || {
             let column = if coarse { 0 } else { x };
-            ops::binary(BinaryOperator::Subtract, at(column + 2), at(column))
+            // WebGL counts window y up, so its y derivative runs the other way.
+            if self.interp.capture().target.y_up {
+                ops::binary(BinaryOperator::Subtract, at(column), at(column + 2))
+            } else {
+                ops::binary(BinaryOperator::Subtract, at(column + 2), at(column))
+            }
         };
         match axis {
             DerivativeAxis::X => dx(),

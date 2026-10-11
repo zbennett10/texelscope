@@ -22,6 +22,19 @@ pub struct Capture {
     pub inputs: FragmentInputs,
     #[serde(default)]
     pub bindings: Vec<Binding>,
+    /// What the app's GPU drew, for comparing with the interpreter and for showing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<Reference>,
+}
+
+/// Pixels the app's GPU drew into the target.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Reference {
+    /// Where the pixels sit in the target.
+    pub rect: Rect,
+    /// RGBA, one byte each, rows from the top, as base64.
+    pub rgba8: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -55,6 +68,10 @@ pub struct Target {
     pub width: u32,
     pub height: u32,
     pub format: TextureFormat,
+    /// Whether the API counts window y up from the bottom, as WebGL does, which flips the
+    /// sign of derivatives in y. Pixels are still numbered from the top.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub y_up: bool,
 }
 
 /// A rectangle of pixels in the target.
@@ -76,13 +93,37 @@ impl Rect {
 
 /// How the fragment shader's inputs are produced.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum FragmentInputs {
     /// Only builtins such as position.
     #[default]
     Builtins,
     /// A full-screen pass, with each location interpolated from corner values.
     Fullscreen { locations: Vec<CornerInput> },
+    /// The values a draw gave each pixel of a window of the target, read back from the GPU.
+    /// Inputs are named as the shader declares them.
+    Window {
+        rect: Rect,
+        /// The fragment position at each pixel, four floats, rows from the top, as base64 of
+        /// little-endian f32s.
+        frag_coord: String,
+        varyings: Vec<WindowInput>,
+    },
+}
+
+/// One input over a window, NaN where the draw didn't cover a pixel.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WindowInput {
+    pub name: String,
+    /// Floats per pixel.
+    pub components: u32,
+    /// Rows from the top, as base64 of little-endian f32s.
+    pub data: String,
 }
 
 /// A user input interpolated across the target from its four corner values.
@@ -101,6 +142,10 @@ pub struct Binding {
     pub binding: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// The GLSL uniform, uniform block or sampler this binds. WebGL binds by name, so when
+    /// this is set `group` and `binding` are ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub resource: Resource,
 }
 

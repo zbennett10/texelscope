@@ -1,7 +1,17 @@
 use naga::valid::{Capabilities, ModuleInfo, ValidationFlags, Validator};
 use serde::{Deserialize, Serialize};
 
+use crate::glsl::GlslLayout;
 use crate::ids::{ExprRef, FunctionRef, LineCol, SourceSpan};
+
+/// The language a shader is written in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Language {
+    Wgsl,
+    /// GLSL ES 3.00, as WebGL2 runs it.
+    Glsl,
+}
 
 /// Why a shader could not be loaded. The message is naga's rendered diagnostic.
 #[derive(Debug, thiserror::Error)]
@@ -132,9 +142,47 @@ pub struct ShaderModule {
     source: String,
     module: naga::Module,
     info: ModuleInfo,
+    /// Where a GLSL shader's inputs and uniforms went, or `None` for WGSL.
+    glsl: Option<GlslLayout>,
 }
 
 impl ShaderModule {
+    /// Parses and validates a GLSL ES 3.00 fragment shader, as WebGL2 runs it. naga reads
+    /// Vulkan GLSL 450, so the shader is rewritten first, and every span is moved back onto
+    /// the original source, which is what [`ShaderModule::source`] returns.
+    pub fn from_glsl(source: impl Into<String>) -> Result<Self, IrError> {
+        let source = source.into();
+        let converted = crate::glsl::convert(&source).map_err(IrError::Parse)?;
+        let options = naga::front::glsl::Options::from(naga::ShaderStage::Fragment);
+        let mut module = naga::front::glsl::Frontend::default()
+            .parse(&options, &converted.text)
+            .map_err(|e| IrError::Parse(e.emit_to_string(&converted.text)))?;
+        let info = Validator::new(ValidationFlags::all(), Capabilities::default())
+            .validate(&module)
+            .map_err(|e| IrError::Validate(e.emit_to_string(&converted.text)))?;
+        let map = |span: naga::Span| match span.to_range() {
+            Some(r) => naga::Span::new(
+                converted.original(r.start, false) as u32,
+                converted.original(r.end, true) as u32,
+            ),
+            None => span,
+        };
+        remap_spans(&mut module, &map);
+        cover_operands(&mut module, &source);
+        name_uniforms(&mut module, &converted.layout);
+        Ok(Self {
+            source,
+            module,
+            info,
+            glsl: Some(converted.layout),
+        })
+    }
+
+    /// Where a GLSL shader's inputs and uniforms went, by their names in WebGL.
+    pub fn glsl_layout(&self) -> Option<&GlslLayout> {
+        self.glsl.as_ref()
+    }
+
     /// Parses and validates WGSL with WebGPU's default capabilities.
     pub fn from_wgsl(source: impl Into<String>) -> Result<Self, IrError> {
         let source = source.into();
@@ -147,7 +195,25 @@ impl ShaderModule {
             source,
             module,
             info,
+            glsl: None,
         })
+    }
+
+    /// Parses a shader in its capture's language.
+    pub fn from_language(language: Language, source: impl Into<String>) -> Result<Self, IrError> {
+        match language {
+            Language::Wgsl => Self::from_wgsl(source),
+            Language::Glsl => Self::from_glsl(source),
+        }
+    }
+
+    /// The language the source is written in.
+    pub fn language(&self) -> Language {
+        if self.glsl.is_some() {
+            Language::Glsl
+        } else {
+            Language::Wgsl
+        }
     }
 
     pub fn source(&self) -> &str {
@@ -376,6 +442,22 @@ impl ShaderModule {
 
     /// The type naga inferred for an expression.
     pub fn type_of(&self, expr: ExprRef) -> Option<&naga::TypeInner> {
+        let (info, _) = self.expression_info(expr)?;
+        Some(info.ty.inner_with(&self.module.types))
+    }
+
+    /// Whether an expression has the same value at every pixel, because it comes only from
+    /// constants and settings such as uniforms. naga's uniformity analysis decides, and it
+    /// counts locals, helper parameters and anything from a per-pixel input as varying.
+    pub fn is_uniform(&self, expr: ExprRef) -> bool {
+        self.expression_info(expr)
+            .is_some_and(|(info, _)| info.uniformity.non_uniform_result.is_none())
+    }
+
+    fn expression_info(
+        &self,
+        expr: ExprRef,
+    ) -> Option<(&naga::valid::ExpressionInfo, naga::Handle<naga::Expression>)> {
         let (_, handle) = self.expression(expr)?;
         let info = match expr.function {
             FunctionRef::EntryPoint(i) => self.info.get_entry_point(i as usize),
@@ -384,7 +466,7 @@ impl ShaderModule {
                 &self.info[h]
             }
         };
-        Some(info[handle].ty.inner_with(&self.module.types))
+        Some((&info[handle], handle))
     }
 
     /// The location inputs of a fragment entry point, for building a vertex stage that
@@ -461,6 +543,38 @@ impl ShaderModule {
         LineCol { line, column }
     }
 
+    /// The lines, counted from 1, that compute a value a trace records when it runs: the
+    /// emitted expressions and call results of every function. A viewer that dims the ones a
+    /// trace never touched shows which code a pixel skipped.
+    pub fn code_lines(&self) -> Vec<u32> {
+        let starts: Vec<usize> = std::iter::once(0)
+            .chain(self.source.match_indices('\n').map(|(i, _)| i + 1))
+            .collect();
+        let line = |offset: u32| starts.partition_point(|&s| s <= offset as usize) as u32;
+        let mut lines = std::collections::BTreeSet::new();
+        for (function, _, f) in self.functions() {
+            let mut handles = Vec::new();
+            recorded_expressions(&f.body, &mut handles);
+            for handle in handles {
+                // A pointer into a variable is no value of its own, so no step records it.
+                let expr = ExprRef {
+                    function,
+                    expr: handle.index() as u32,
+                };
+                if matches!(
+                    self.type_of(expr),
+                    Some(naga::TypeInner::Pointer { .. } | naga::TypeInner::ValuePointer { .. })
+                ) {
+                    continue;
+                }
+                if let Some(span) = SourceSpan::from_naga(f.expressions.get_span(handle)) {
+                    lines.extend(line(span.start)..=line(span.end.max(span.start + 1) - 1));
+                }
+            }
+        }
+        lines.into_iter().collect()
+    }
+
     fn functions(&self) -> impl Iterator<Item = (FunctionRef, &str, &naga::Function)> {
         let helpers = self.module.functions.iter().map(|(handle, f)| {
             let name = f.name.as_deref().unwrap_or("");
@@ -474,5 +588,226 @@ impl ShaderModule {
             )
         });
         helpers.chain(entries)
+    }
+}
+
+/// The expressions of a block that run as steps: those it emits and the results of its calls.
+fn recorded_expressions(block: &naga::Block, out: &mut Vec<naga::Handle<naga::Expression>>) {
+    use naga::Statement as S;
+    for statement in block.iter() {
+        match statement {
+            S::Emit(range) => out.extend(range.clone()),
+            S::Call {
+                result: Some(result),
+                ..
+            } => out.push(*result),
+            S::Block(inner) => recorded_expressions(inner, out),
+            S::If { accept, reject, .. } => {
+                recorded_expressions(accept, out);
+                recorded_expressions(reject, out);
+            }
+            S::Switch { cases, .. } => {
+                for case in cases {
+                    recorded_expressions(&case.body, out);
+                }
+            }
+            S::Loop {
+                body, continuing, ..
+            } => {
+                recorded_expressions(body, out);
+                recorded_expressions(continuing, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Moves every expression and statement span through `map`.
+fn remap_spans(module: &mut naga::Module, map: &dyn Fn(naga::Span) -> naga::Span) {
+    let functions = module
+        .functions
+        .iter_mut()
+        .map(|(_, f)| f)
+        .chain(module.entry_points.iter_mut().map(|ep| &mut ep.function));
+    for f in functions {
+        let old = std::mem::take(&mut f.expressions);
+        for (handle, expression) in old.iter() {
+            f.expressions
+                .append(expression.clone(), map(old.get_span(handle)));
+        }
+        let old = std::mem::take(&mut f.local_variables);
+        for (handle, local) in old.iter() {
+            f.local_variables
+                .append(local.clone(), map(old.get_span(handle)));
+        }
+        remap_block(&mut f.body, map);
+    }
+}
+
+/// Widens each expression's span to take in operands on its own line. naga's GLSL front end
+/// spans `uv.x * k` from `.x`, leaving out the `uv` the access starts from.
+fn cover_operands(module: &mut naga::Module, source: &str) {
+    let line_start = |offset: usize| {
+        source[..offset.min(source.len())]
+            .rfind('\n')
+            .map_or(0, |i| i + 1)
+    };
+    let functions = module
+        .functions
+        .iter_mut()
+        .map(|(_, f)| f)
+        .chain(module.entry_points.iter_mut().map(|ep| &mut ep.function));
+    for f in functions {
+        let old = std::mem::take(&mut f.expressions);
+        let mut spans: Vec<Option<std::ops::Range<usize>>> = Vec::with_capacity(old.len());
+        for (handle, expression) in old.iter() {
+            let own = old.get_span(handle).to_range();
+            let mut span = own.clone();
+            if let Some(own) = own {
+                let first = line_start(own.start);
+                for operand in value_operands(expression) {
+                    let Some(Some(o)) = spans.get(operand.index()) else {
+                        continue;
+                    };
+                    if o.start >= first && o.end <= own.end {
+                        let s = span.get_or_insert(own.clone());
+                        s.start = s.start.min(o.start);
+                    }
+                }
+            } else if let Some(Some(first)) =
+                call_argument(expression).map(|a| spans.get(a.index()))
+            {
+                // naga leaves builtin calls such as `step(a, b)` unspanned.
+                span = first
+                    .as_ref()
+                    .and_then(|first| enclosing_call(source, first.start));
+            }
+            spans.push(span.clone());
+            let span = span.map_or(naga::Span::UNDEFINED, |r| {
+                naga::Span::new(r.start as u32, r.end as u32)
+            });
+            f.expressions.append(expression.clone(), span);
+        }
+    }
+}
+
+/// The first argument of a builtin call, for the expressions naga makes from calls.
+fn call_argument(expression: &naga::Expression) -> Option<naga::Handle<naga::Expression>> {
+    match *expression {
+        naga::Expression::Math { arg, .. } => Some(arg),
+        naga::Expression::Relational { argument, .. } => Some(argument),
+        _ => None,
+    }
+}
+
+/// The span of `name(...)` around a call's first argument, which starts at `first`.
+fn enclosing_call(source: &str, first: usize) -> Option<std::ops::Range<usize>> {
+    let before = source
+        .get(..first)?
+        .trim_end()
+        .strip_suffix('(')?
+        .trim_end();
+    let name = before
+        .bytes()
+        .rev()
+        .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        .count();
+    if name == 0 {
+        return None;
+    }
+    let start = before.len() - name;
+    let open = start + source[start..].find('(')?;
+    let mut depth = 0;
+    for (i, c) in source[open..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(start..open + i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The operands of an expression that compute values where it is used, leaving out pointers
+/// to variables, which naga spans by their declarations.
+fn value_operands(expression: &naga::Expression) -> Vec<naga::Handle<naga::Expression>> {
+    use naga::Expression as E;
+    match *expression {
+        E::AccessIndex { base, .. } => vec![base],
+        E::Access { base, index } => vec![base, index],
+        E::Swizzle { vector, .. } => vec![vector],
+        E::Binary { left, right, .. } => vec![left, right],
+        E::Unary { expr, .. } | E::As { expr, .. } | E::Derivative { expr, .. } => vec![expr],
+        E::Select {
+            condition,
+            accept,
+            reject,
+        } => vec![condition, accept, reject],
+        E::Math {
+            arg,
+            arg1,
+            arg2,
+            arg3,
+            ..
+        } => [Some(arg), arg1, arg2, arg3]
+            .into_iter()
+            .flatten()
+            .collect(),
+        E::Relational { argument, .. } => vec![argument],
+        E::Splat { value, .. } => vec![value],
+        E::Compose { ref components, .. } => components.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// Names the global of each uniform the rewrite wrapped in a block after the uniform, and an
+/// unnamed block's global after the block, so resources read as the shader declares them.
+fn name_uniforms(module: &mut naga::Module, layout: &GlslLayout) {
+    for (_, global) in module.global_variables.iter_mut() {
+        let Some(binding) = &global.binding else {
+            continue;
+        };
+        if global.name.is_some() || binding.group != 0 {
+            continue;
+        }
+        if let Some(u) = layout
+            .uniforms
+            .iter()
+            .find(|u| u.binding == binding.binding)
+        {
+            global.name = Some(u.name.clone());
+        }
+    }
+}
+
+fn remap_block(block: &mut naga::Block, map: &dyn Fn(naga::Span) -> naga::Span) {
+    for (statement, span) in block.span_iter_mut() {
+        if let Some(span) = span {
+            *span = map(*span);
+        }
+        match statement {
+            naga::Statement::Block(inner) => remap_block(inner, map),
+            naga::Statement::If { accept, reject, .. } => {
+                remap_block(accept, map);
+                remap_block(reject, map);
+            }
+            naga::Statement::Loop {
+                body, continuing, ..
+            } => {
+                remap_block(body, map);
+                remap_block(continuing, map);
+            }
+            naga::Statement::Switch { cases, .. } => {
+                for case in cases {
+                    remap_block(&mut case.body, map);
+                }
+            }
+            _ => {}
+        }
     }
 }
