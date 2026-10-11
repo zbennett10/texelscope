@@ -14,6 +14,24 @@ export interface Capture {
   /** Defaults to `{ kind: 'builtins' }`. */
   inputs?: FragmentInputs;
   bindings?: Binding[];
+  /** What the app's GPU drew, for comparing with the interpreter and for showing. */
+  reference?: Reference;
+}
+
+/** Pixels the app's GPU drew into the target. */
+export interface Reference {
+  /** Where the pixels sit in the target. */
+  rect: Rect;
+  /** RGBA, one byte each, rows from the top, as base64. */
+  rgba8: string;
+}
+
+/** A rectangle of pixels, counted from the top left. */
+export interface Rect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 export interface Shader {
@@ -29,6 +47,8 @@ export interface Target {
   width: number;
   height: number;
   format: TextureFormat;
+  /** Whether the API counts window y up from the bottom, as WebGL does. Pixels are still numbered from the top. */
+  yUp?: boolean;
 }
 
 export type TextureFormat =
@@ -43,7 +63,23 @@ export type TextureFormat =
 
 export type FragmentInputs =
   | { kind: 'builtins' }
-  | { kind: 'fullscreen'; locations: CornerInput[] };
+  | { kind: 'fullscreen'; locations: CornerInput[] }
+  | {
+      kind: 'window';
+      rect: Rect;
+      /** The fragment position at each pixel, four floats, rows from the top, as base64 of f32s. */
+      fragCoord: string;
+      varyings: WindowInput[];
+    };
+
+/** One input over a window, NaN where the draw didn't cover a pixel. */
+export interface WindowInput {
+  name: string;
+  /** Floats per pixel. */
+  components: number;
+  /** Rows from the top, as base64 of little-endian f32s. */
+  data: string;
+}
 
 /** A user input interpolated across the target from its four corner values. */
 export interface CornerInput {
@@ -56,6 +92,8 @@ export interface Binding {
   group: number;
   binding: number;
   label?: string;
+  /** The GLSL uniform, block or sampler this binds. WebGL binds by name, so `group` and `binding` are then ignored. */
+  name?: string;
   resource: Resource;
 }
 

@@ -1,3 +1,4 @@
+import { animation, useAnimation } from '../animation.js';
 import type { Capture, FragmentInputs } from '../capture.js';
 import { installPatches } from './install.js';
 import { restoreAll } from './patch.js';
@@ -22,22 +23,24 @@ export interface WebGPUSession {
   uninstall(): void;
 }
 
-let installed = false;
+let active: WebGPUSession | undefined;
 
 /**
  * Patches WebGPU in this global scope, a page or a worker, so draws can be captured.
- * Call it before the app requests its GPUDevice.
+ * Call it before the app requests its GPUDevice. A second call, say from the app after the
+ * Texelscope extension or Vite plugin installed the hook, gets the session already running.
  */
 export function installWebGPU(options: WebGPUInstallOptions = {}): WebGPUSession {
   if (typeof GPUDevice === 'undefined') throw new Error('WebGPU is not available in this scope');
-  if (installed) throw new Error('installWebGPU is already installed here, so uninstall the first session');
-  installed = true;
+  if (active) return active;
 
   const inputs = options.inputs ?? { kind: 'builtins' };
   const waiting: { resolve: (capture: Capture) => void; reject: (error: unknown) => void }[] = [];
+  const release = useAnimation();
 
   installPatches({
     onDraw(pass) {
+      animation.drew();
       if (waiting.length === 0) return;
       const state = passes.get(pass);
       const descriptor = state?.pipeline ? pipelines.get(state.pipeline) : undefined;
@@ -80,14 +83,16 @@ export function installWebGPU(options: WebGPUInstallOptions = {}): WebGPUSession
     },
   });
 
-  return {
+  active = {
     captureNextDraw() {
       return new Promise<Capture>((resolve, reject) => waiting.push({ resolve, reject }));
     },
     uninstall() {
       restoreAll();
-      installed = false;
+      release();
+      active = undefined;
       for (const waiter of waiting.splice(0)) waiter.reject(new Error('the WebGPU hook was uninstalled'));
     },
   };
+  return active;
 }
