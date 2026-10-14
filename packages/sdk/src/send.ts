@@ -34,7 +34,8 @@ export interface OpenOptions {
   timeout?: number;
 }
 
-let ui: { window: Window; ready: Promise<void> } | undefined;
+/** The UI tab, and the origin it answers from once it is listening. */
+let ui: { window: Window; ready: Promise<string> } | undefined;
 
 /**
  * Opens the Texelscope UI in another tab, or reuses the one already open, and sends it a
@@ -42,12 +43,13 @@ let ui: { window: Window; ready: Promise<void> } | undefined;
  */
 export async function openInTexelscope(capture: Capture, options: OpenOptions = {}): Promise<void> {
   const url = options.url ?? defaultUi();
-  const origin = new URL(url).origin;
   connectTexelscope(url);
   if (!ui) throw new Error(`the browser blocked opening ${url}`);
   const timeout = options.timeout ?? 20000;
+  let origin: string;
   try {
-    await within(ui.ready, timeout);
+    // A tab found by name may hold the UI from another address, such as the dev server's.
+    origin = await within(ui.ready, timeout);
   } catch {
     ui = undefined;
     throw new Error(`Texelscope did not answer at ${url} within ${timeout / 1000} s. Is its UI running?`);
@@ -73,7 +75,7 @@ export function connectTexelscope(url: string = defaultUi()): void {
   if (!target) return;
   const blank = isBlank(target);
   if (blank) target.location.href = url;
-  ui = { window: target, ready: readyFrom(target, blank ? undefined : new URL(url).origin) };
+  ui = { window: target, ready: readyFrom(target, !blank) };
 }
 
 /** Whether a window is still the blank page `window.open` makes, rather than a UI tab. */
@@ -86,17 +88,20 @@ function isBlank(target: Window): boolean {
   }
 }
 
-/** Waits for the UI to say it is listening, asking it first when it is already loaded. */
-function readyFrom(target: Window, loadedAt?: string): Promise<void> {
+/**
+ * Waits for the UI to say it is listening, asking it first when it is already loaded, and
+ * resolves with the origin it answered from. The hello carries nothing, so it goes to any origin.
+ */
+function readyFrom(target: Window, loaded: boolean): Promise<string> {
   return new Promise((resolve) => {
     const listen = (event: MessageEvent) => {
       if (event.source === target && event.data?.type === 'texelscope:ready') {
         window.removeEventListener('message', listen);
-        resolve();
+        resolve(event.origin);
       }
     };
     window.addEventListener('message', listen);
-    if (loadedAt) target.postMessage({ type: 'texelscope:hello' }, loadedAt);
+    if (loaded) target.postMessage({ type: 'texelscope:hello' }, '*');
   });
 }
 

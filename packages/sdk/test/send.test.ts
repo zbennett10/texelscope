@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Capture } from '../src/capture.js';
 
-type Listener = (event: { source: unknown; data: unknown }) => void;
+type Listener = (event: { source: unknown; data: unknown; origin: string }) => void;
 
 /** A page with `window.open`, and the tab it opens. */
 function browser(options: { loaded: boolean; answers: boolean }) {
@@ -27,10 +27,12 @@ function browser(options: { loaded: boolean; answers: boolean }) {
     },
     postMessage(message: { type: string }, origin: string) {
       posted.push({ message, origin });
-      if (message.type === 'texelscope:hello' && options.answers) queueMicrotask(() => say({ type: 'texelscope:ready' }));
+      // Browsers drop a message whose target origin isn't the tab's.
+      const delivered = origin === '*' || origin === new URL(tab.href).origin;
+      if (delivered && message.type === 'texelscope:hello' && options.answers) queueMicrotask(() => say({ type: 'texelscope:ready' }));
     },
   };
-  const say = (data: unknown) => listeners.forEach((l) => l({ source: tab, data }));
+  const say = (data: unknown) => listeners.forEach((l) => l({ source: tab, data, origin: new URL(tab.href).origin }));
   const open = vi.fn(() => tab);
   vi.stubGlobal('window', {
     open,
@@ -76,6 +78,15 @@ describe('openInTexelscope', () => {
     delete (globalThis as Record<symbol, unknown>)[Symbol.for('texelscope.ui')];
     expect(tab.href).toBe('http://localhost:5180/__texelscope/');
     expect(posted[0]?.origin).toBe('http://localhost:5180');
+    tab.closed = true;
+  });
+
+  it('sends to a Texelscope tab left open at another address than the one asked for', async () => {
+    const { openInTexelscope } = await import('../src/send.js');
+    const { tab, posted } = browser({ loaded: true, answers: true });
+    await openInTexelscope(capture, { url: 'http://localhost:5180/__texelscope/', timeout: 50 });
+    expect(tab.href).toBe('http://localhost:5173/');
+    expect(posted.at(-1)).toEqual({ message: { type: 'texelscope:capture', capture, pixel: undefined }, origin: 'http://localhost:5173' });
     tab.closed = true;
   });
 
