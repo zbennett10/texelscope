@@ -16,6 +16,9 @@ import type {
   Value,
 } from './types.js';
 import { exampleCapture } from './example.js';
+import { dragTo, MIN_WIDTH, paneWidths, type PaneWidths, type Side } from './panes.js';
+import { loadPanes, loadTheme, savePanes, saveTheme, type Theme } from './prefs.js';
+import { themeTokens } from './theme.js';
 import type { InlineValue } from './views/source-view.js';
 import { branchImage, layerImage } from './views/region-view.js';
 import type { Overlay, ProbeView } from './views/render-view.js';
@@ -29,6 +32,23 @@ interface Frame {
   json: string;
   received: Date;
 }
+
+const other = (side: Side): Side => (side === 'left' ? 'right' : 'left');
+
+/** A ring around one texel. */
+const LOGO = html`<svg class="logo" viewBox="0 0 18 18" width="18" height="18" aria-hidden="true">
+  <circle cx="9" cy="9" r="7.25" fill="none" stroke="currentColor" stroke-width="1.5" />
+  <rect class="texel" x="6.25" y="6.25" width="5.5" height="5.5" rx="1.25" />
+</svg>`;
+
+const SUN = html`<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true">
+  <circle cx="8" cy="8" r="3" />
+  <path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M3.4 12.6l1.1-1.1M11.5 4.5l1.1-1.1" />
+</svg>`;
+
+const MOON = html`<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true">
+  <path d="M13.4 10.2A5.7 5.7 0 0 1 5.8 2.6a5.7 5.7 0 1 0 7.6 7.6z" />
+</svg>`;
 
 /** Texelscope: shader source, the replayed image, and why any pixel or region looks the way it does. */
 export class TexelscopeApp extends LitElement {
@@ -57,97 +77,206 @@ export class TexelscopeApp extends LitElement {
     probe: { state: true },
     gpuError: { state: true },
     dragging: { state: true },
+    theme: { type: String, reflect: true },
   };
 
-  static override styles = css`
-    :host {
-      display: grid;
-      grid-template-columns: minmax(280px, 1fr) minmax(320px, 1.35fr) minmax(320px, 400px);
-      grid-template-rows: auto minmax(0, 1fr) 236px;
-      height: 100vh;
-      font: 13px/1.4 system-ui, sans-serif;
-      color: #111827;
-      background: #f3f4f6;
-    }
-    header {
-      grid-column: 1 / -1;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      padding: 6px 12px;
-      border-bottom: 1px solid #d1d5db;
-      background: #fff;
-    }
-    header h1 {
-      margin: 0;
-      font-size: 15px;
-      font-weight: 650;
-      letter-spacing: 0.01em;
-    }
-    header .dim {
-      color: #9ca3af;
-      font-size: 12px;
-      white-space: nowrap;
-    }
-    header .status {
-      flex: 1;
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      color: #6b7280;
-    }
-    header button,
-    header select,
-    header label.button {
-      font: inherit;
-      font-size: 12px;
-      padding: 3px 9px;
-      border: 1px solid #d1d5db;
-      border-radius: 5px;
-      background: #fff;
-      color: #111827;
-      cursor: pointer;
-    }
-    header input[type='file'] {
-      display: none;
-    }
-    /* Every pane is placed explicitly, since row-locked items would otherwise go first. */
-    texelscope-source-view {
-      grid-column: 1;
-      grid-row: 2 / 4;
-      border-right: 1px solid #d1d5db;
-      min-height: 0;
-    }
-    texelscope-render-view {
-      grid-column: 2;
-      grid-row: 2;
-      min-height: 0;
-    }
-    texelscope-region-view {
-      grid-column: 2;
-      grid-row: 3;
-      border-top: 1px solid #d1d5db;
-      min-height: 0;
-    }
-    texelscope-inspector {
-      grid-column: 3;
-      grid-row: 2 / 4;
-      border-left: 1px solid #d1d5db;
-      min-height: 0;
-    }
-    .drop {
-      position: fixed;
-      inset: 0;
-      display: grid;
-      place-items: center;
-      background: rgba(37, 99, 235, 0.12);
-      border: 3px dashed #2563eb;
-      font-size: 18px;
-      color: #1e3a8a;
-      pointer-events: none;
-    }
-  `;
+  static override styles = [
+    themeTokens,
+    css`
+      :host {
+        display: grid;
+        /* The side panes' widths come from paneWidths, set on the element as it lays out. */
+        grid-template-columns: var(--ts-left, 32%) 0 minmax(0, 1fr) 0 var(--ts-right, 26%);
+        grid-template-rows: auto minmax(0, 1fr) 236px;
+        height: 100vh;
+        font: 13px/1.45 var(--ts-sans);
+        color: var(--ts-text);
+        background: var(--ts-bg);
+        accent-color: var(--ts-accent);
+        -webkit-font-smoothing: antialiased;
+      }
+      :host([resizing]) {
+        user-select: none;
+      }
+      header {
+        grid-column: 1 / -1;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        height: 44px;
+        box-sizing: border-box;
+        padding: 0 10px 0 14px;
+        border-bottom: 1px solid var(--ts-border);
+        background: var(--ts-header);
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-right: 6px;
+      }
+      .logo {
+        flex: none;
+        color: var(--ts-text-4);
+      }
+      .logo .texel {
+        fill: var(--ts-accent);
+      }
+      header h1 {
+        margin: 0;
+        font-size: 14px;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+      }
+      header .dim {
+        color: var(--ts-text-4);
+        font-size: 12px;
+        white-space: nowrap;
+      }
+      header .status {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--ts-text-3);
+        font-size: 12.5px;
+      }
+      header button,
+      header select,
+      header label.button {
+        height: 28px;
+        box-sizing: border-box;
+        padding: 0 11px;
+        border: 1px solid var(--ts-border-strong);
+        border-radius: 7px;
+        background: var(--ts-raised);
+        color: var(--ts-text);
+        font: 500 12px var(--ts-sans);
+        cursor: pointer;
+        transition: background-color 0.15s, border-color 0.15s, color 0.15s;
+      }
+      header button,
+      header label.button {
+        display: inline-flex;
+        align-items: center;
+        white-space: nowrap;
+      }
+      header button:hover,
+      header select:hover,
+      header label.button:hover {
+        background: var(--ts-raised-hover);
+        border-color: var(--ts-border-hover);
+      }
+      header button:focus-visible,
+      header select:focus-visible,
+      header label.button:focus-within {
+        outline: 2px solid var(--ts-focus);
+        outline-offset: 1px;
+      }
+      header button.icon {
+        justify-content: center;
+        width: 28px;
+        padding: 0;
+        color: var(--ts-text-2);
+      }
+      header button.icon:hover {
+        color: var(--ts-text);
+      }
+      header input[type='file'] {
+        display: none;
+      }
+      /* Every pane is placed explicitly, since row-locked items would otherwise go first. */
+      texelscope-source-view {
+        grid-column: 1;
+        grid-row: 2 / 4;
+        min-width: 0;
+        min-height: 0;
+      }
+      texelscope-render-view {
+        grid-column: 3;
+        grid-row: 2;
+        min-height: 0;
+      }
+      texelscope-region-view {
+        grid-column: 3;
+        grid-row: 3;
+        border-top: 1px solid var(--ts-border);
+        min-height: 0;
+      }
+      texelscope-inspector {
+        grid-column: 5;
+        grid-row: 2 / 4;
+        min-width: 0;
+        min-height: 0;
+      }
+      /* The edge between two panes. It sits in a column of no width, with its line and grip around it. */
+      .splitter {
+        position: relative;
+        z-index: 3;
+        grid-row: 2 / 4;
+        outline: none;
+        touch-action: none;
+      }
+      .splitter.left {
+        grid-column: 2;
+      }
+      .splitter.right {
+        grid-column: 4;
+      }
+      .splitter::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: -1px;
+        width: 1px;
+        background: var(--ts-border);
+        transition: background-color 0.15s, box-shadow 0.15s;
+      }
+      .splitter::after {
+        content: '';
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: -5px;
+        right: -5px;
+        cursor: col-resize;
+      }
+      .splitter:hover::before {
+        transition-delay: 0.1s;
+      }
+      .splitter:hover::before,
+      .splitter:focus-visible::before,
+      .splitter[data-active]::before {
+        background: var(--ts-accent);
+        box-shadow: 0 0 0 1px var(--ts-accent);
+      }
+      /* Covers the page while an edge moves, so the panes under the pointer don't react. */
+      .shield {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 10;
+        cursor: col-resize;
+      }
+      :host([resizing]) .shield {
+        display: block;
+      }
+      .drop {
+        position: fixed;
+        inset: 0;
+        z-index: 10;
+        display: grid;
+        place-items: center;
+        background: var(--ts-blue-soft);
+        border: 2px dashed var(--ts-blue);
+        font-size: 18px;
+        color: var(--ts-text);
+        pointer-events: none;
+      }
+    `,
+  ];
 
   declare frames: Frame[];
   declare current: number;
@@ -177,6 +306,12 @@ export class TexelscopeApp extends LitElement {
   #probeImage?: { data: Float32Array; channel: number; image: ImageData };
   declare gpuError: string;
   declare dragging: boolean;
+  declare theme: Theme;
+
+  /** The side pane widths set by dragging, and the widths in use once fitted to the window. */
+  #chosen: Partial<PaneWidths> = loadPanes();
+  #widths: PaneWidths = { left: 0, right: 0 };
+  #layout = new ResizeObserver(() => this.#fitPanes());
 
   #engine = new Engine();
   #replay?: Replay;
@@ -212,6 +347,7 @@ export class TexelscopeApp extends LitElement {
     this.probe = null;
     this.gpuError = '';
     this.dragging = false;
+    this.theme = loadTheme();
     this.#replayReady = Replay.create().then(
       (replay) => {
         this.#replay = replay;
@@ -234,11 +370,13 @@ export class TexelscopeApp extends LitElement {
     this.addEventListener('dragleave', () => (this.dragging = false));
     this.addEventListener('drop', (e) => this.#drop(e));
     window.addEventListener('keydown', this.#onKey);
+    this.#layout.observe(this);
   }
 
   override disconnectedCallback() {
     window.removeEventListener('message', this.#onMessage);
     window.removeEventListener('keydown', this.#onKey);
+    this.#layout.disconnect();
     super.disconnectedCallback();
   }
 
@@ -255,7 +393,7 @@ export class TexelscopeApp extends LitElement {
     const target = frame?.capture.target;
     return html`
       <header>
-        <h1>Texelscope</h1>
+        <div class="brand">${LOGO}<h1>Texelscope</h1></div>
         ${this.frames.length > 1
           ? html`<select @change=${(e: Event) => this.#select(Number((e.target as HTMLSelectElement).value))}>
               ${this.frames.map((f, i) => html`<option value=${i} ?selected=${i === this.current}>
@@ -267,8 +405,13 @@ export class TexelscopeApp extends LitElement {
         <span class="status" title=${this.status}>${this.status}</span>
         <label class="button">Open capture<input type="file" accept=".json,application/json" @change=${this.#pickFile} /></label>
         <button @click=${() => this.#receive(exampleCapture(), [100, 128])}>Example</button>
+        <button class="icon" title=${this.theme === 'dark' ? 'Light theme' : 'Dark theme'}
+          aria-label=${this.theme === 'dark' ? 'Switch to the light theme' : 'Switch to the dark theme'}
+          @click=${this.#toggleTheme}>${this.theme === 'dark' ? SUN : MOON}</button>
       </header>
       <texelscope-source-view
+        id="source"
+        .theme=${this.theme}
         .source=${this.source}
         .highlight=${this.highlight}
         .values=${this.#inlineValues()}
@@ -277,6 +420,7 @@ export class TexelscopeApp extends LitElement {
         .error=${this.sourceError}
         @edit=${(e: CustomEvent<string>) => this.#edit(e.detail)}
       ></texelscope-source-view>
+      ${this.#splitter('left')}
       <texelscope-render-view
         .targetWidth=${target?.width ?? 0}
         .targetHeight=${target?.height ?? 0}
@@ -306,7 +450,9 @@ export class TexelscopeApp extends LitElement {
         @probe=${(e: CustomEvent<{ expr: ExprRef; name: string }>) => this.#showProbe(e.detail.expr, e.detail.name)}
         @highlight=${(e: CustomEvent<SourceSpan>) => (this.highlight = e.detail)}
       ></texelscope-region-view>
+      ${this.#splitter('right')}
       <texelscope-inspector
+        id="inspector"
         .explanation=${this.explanation}
         .comparison=${this.comparison}
         .language=${frame?.capture.shader.language ?? 'wgsl'}
@@ -329,8 +475,90 @@ export class TexelscopeApp extends LitElement {
         @remove-override=${(e: CustomEvent<number>) => this.#setOverrides(this.whatIf.filter((_, i) => i !== e.detail))}
         @clear-overrides=${() => this.#setOverrides([])}
       ></texelscope-inspector>
+      <div class="shield"></div>
       ${this.dragging ? html`<div class="drop">Drop a capture to open it</div>` : nothing}
     `;
+  }
+
+  #toggleTheme = () => {
+    this.theme = this.theme === 'dark' ? 'light' : 'dark';
+    saveTheme(this.theme);
+  };
+
+  /** The edge between a side pane and the image, dragged with the pointer or moved with the arrow keys. */
+  #splitter(side: Side) {
+    return html`<div class="splitter ${side}" role="separator" tabindex="0" aria-orientation="vertical"
+      aria-controls=${side === 'left' ? 'source' : 'inspector'}
+      aria-label=${side === 'left' ? 'Source width' : 'Explanation width'}
+      aria-valuemin=${MIN_WIDTH[side]}
+      @pointerdown=${(e: PointerEvent) => this.#startResize(e, side)}
+      @keydown=${(e: KeyboardEvent) => this.#resizeKey(e, side)}
+      @dblclick=${() => this.#choosePane(side, undefined)}></div>`;
+  }
+
+  /** Lays the side panes out at their chosen widths, fitted to the window. */
+  #fitPanes() {
+    const width = this.clientWidth;
+    if (!width) return;
+    this.#widths = paneWidths(this.#chosen, width);
+    for (const side of ['left', 'right'] as const) {
+      this.style.setProperty(`--ts-${side}`, `${this.#widths[side]}px`);
+      const splitter = this.renderRoot.querySelector(`.splitter.${side}`);
+      splitter?.setAttribute('aria-valuenow', String(this.#widths[side]));
+      splitter?.setAttribute('aria-valuemax', String(Math.max(MIN_WIDTH[side], width - MIN_WIDTH.middle - this.#widths[other(side)])));
+    }
+  }
+
+  /** Sets one side pane's width, or returns it to its default when given undefined. */
+  #choosePane(side: Side, width: number | undefined, save = true) {
+    const pick = (s: Side) => (s === side ? width : this.#chosen[s]);
+    const left = pick('left');
+    const right = pick('right');
+    this.#chosen = { ...(left !== undefined && { left }), ...(right !== undefined && { right }) };
+    this.#fitPanes();
+    if (save) savePanes(this.#chosen);
+  }
+
+  #startResize(e: PointerEvent, side: Side) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const handle = e.currentTarget as HTMLElement;
+    handle.setPointerCapture(e.pointerId);
+    handle.toggleAttribute('data-active', true);
+    this.toggleAttribute('resizing', true);
+    const box = this.getBoundingClientRect();
+    // Where on the edge the pointer took hold, so the edge doesn't jump to the pointer.
+    const edge = side === 'left' ? this.#widths.left : box.width - this.#widths.right;
+    const grip = e.clientX - box.left - edge;
+    const done = new AbortController();
+    const signal = done.signal;
+    handle.addEventListener(
+      'pointermove',
+      (move) => this.#choosePane(side, dragTo(side, move.clientX - box.left - grip, box.width, this.#widths[other(side)]), false),
+      { signal },
+    );
+    const end = () => {
+      done.abort();
+      handle.removeAttribute('data-active');
+      // Focus left on the edge would take the arrow keys, which step through frames.
+      handle.blur();
+      this.removeAttribute('resizing');
+      savePanes(this.#chosen);
+    };
+    handle.addEventListener('pointerup', end, { signal });
+    handle.addEventListener('lostpointercapture', end, { signal });
+  }
+
+  #resizeKey(e: KeyboardEvent, side: Side) {
+    const step = e.shiftKey ? 64 : 16;
+    const move = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
+    if (!move) return;
+    // The arrow keys also step through frames, which they shouldn't while an edge has focus.
+    e.preventDefault();
+    e.stopPropagation();
+    const width = this.clientWidth;
+    const edge = side === 'left' ? this.#widths.left : width - this.#widths.right;
+    this.#choosePane(side, dragTo(side, edge + move, width, this.#widths[other(side)]));
   }
 
   #onMessage = (event: MessageEvent) => {

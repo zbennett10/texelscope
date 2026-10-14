@@ -78,21 +78,21 @@ export class TexelscopeRegionView extends LitElement {
       display: grid;
       grid-template-rows: auto minmax(0, 1fr);
       overflow: hidden;
-      background: #fff;
-      font: 12px/1.4 system-ui, sans-serif;
-      color: #111827;
+      background: var(--ts-surface);
+      font: 12px/1.45 var(--ts-sans);
+      color: var(--ts-text);
     }
     header {
-      padding: 5px 12px;
-      border-bottom: 1px solid #e5e7eb;
-      color: #4b5563;
+      padding: 7px 14px;
+      border-bottom: 1px solid var(--ts-border);
+      color: var(--ts-text-2);
     }
     .key {
       display: flex;
       flex-wrap: wrap;
       gap: 2px 12px;
-      margin-top: 2px;
-      color: #6b7280;
+      margin-top: 3px;
+      color: var(--ts-text-3);
       font-size: 11px;
     }
     .ramp {
@@ -123,8 +123,8 @@ export class TexelscopeRegionView extends LitElement {
     }
     .dot.none {
       box-sizing: border-box;
-      border: 1px solid #d1d5db;
-      background: repeating-conic-gradient(#ddd 0 25%, #fff 0 50%) 0 0 / 4px 4px;
+      border: 1px solid var(--ts-border-strong);
+      background: repeating-conic-gradient(var(--ts-swatch-a) 0 25%, var(--ts-swatch-b) 0 50%) 0 0 / 4px 4px;
     }
     .body {
       display: grid;
@@ -139,51 +139,53 @@ export class TexelscopeRegionView extends LitElement {
       min-height: 0;
       overflow: auto;
       padding-bottom: 8px;
-      border-left: 1px solid #e5e7eb;
-      background: #fafafa;
+      border-left: 1px solid var(--ts-border);
+      background: var(--ts-surface-2);
     }
     h3 {
-      margin: 6px 12px 0;
+      margin: 8px 14px 0;
       font-size: 10.5px;
       font-weight: 600;
-      letter-spacing: 0.05em;
+      letter-spacing: 0.08em;
       text-transform: uppercase;
-      color: #6b7280;
+      color: var(--ts-text-3);
     }
     .grid {
       display: flex;
       gap: 8px;
-      padding: 6px 12px 10px;
+      padding: 6px 14px 10px;
       overflow-x: auto;
     }
     .card {
       flex: 0 0 auto;
       width: 120px;
       padding: 4px;
-      border: 1px solid #e5e7eb;
-      border-radius: 6px;
+      border: 1px solid var(--ts-border);
+      border-radius: 8px;
+      background: var(--ts-surface-2);
       cursor: pointer;
+      transition: border-color 0.15s, box-shadow 0.15s;
     }
     .card:hover {
-      border-color: #9ca3af;
+      border-color: var(--ts-border-hover);
     }
     .card.shown {
-      border-color: #db2777;
-      box-shadow: 0 0 0 1px #db2777;
+      border-color: var(--ts-accent);
+      box-shadow: 0 0 0 1px var(--ts-accent);
     }
     .card.edge {
-      border-color: #f59e0b;
+      border-color: var(--ts-amber);
     }
     .starts {
       margin: -1px 0 3px;
-      color: #b45309;
-      font: 600 10px system-ui, sans-serif;
+      color: var(--ts-amber-text);
+      font: 600 10px var(--ts-sans);
       text-transform: uppercase;
       letter-spacing: 0.04em;
     }
     .edge-note {
       margin-top: 3px;
-      color: #92400e;
+      color: var(--ts-amber-text);
       font-size: 11.5px;
     }
     .edge-note .swatch {
@@ -193,8 +195,8 @@ export class TexelscopeRegionView extends LitElement {
       padding: 0;
       border: 0;
       background: none;
-      color: #b45309;
-      font: 600 11.5px ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: var(--ts-amber-text);
+      font: 600 11.5px var(--ts-mono);
       text-decoration: underline;
       cursor: pointer;
     }
@@ -203,19 +205,20 @@ export class TexelscopeRegionView extends LitElement {
       width: 112px;
       height: 76px;
       object-fit: contain;
+      border-radius: 4px;
       image-rendering: pixelated;
-      background: repeating-conic-gradient(#eee 0 25%, #fff 0 50%) 0 0 / 10px 10px;
+      background: repeating-conic-gradient(var(--ts-swatch-a) 0 25%, var(--ts-swatch-b) 0 50%) 0 0 / 10px 10px;
     }
     .name {
-      margin-top: 3px;
+      margin-top: 4px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      font: 600 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+      font: 600 11px var(--ts-mono);
     }
     .meta {
-      color: #6b7280;
-      font: 10.5px ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: var(--ts-text-3);
+      font: 10.5px var(--ts-mono);
     }
     .meta .dot {
       width: 8px;
@@ -226,33 +229,39 @@ export class TexelscopeRegionView extends LitElement {
       margin-left: 0;
     }
     .chips button {
-      padding: 0 4px;
+      padding: 0 5px;
       margin-right: 2px;
-      font: 10px ui-monospace, monospace;
-      border: 1px solid #d1d5db;
-      border-radius: 3px;
-      background: #fff;
+      font: 10px var(--ts-mono);
+      border: 1px solid var(--ts-border-strong);
+      border-radius: 4px;
+      background: var(--ts-raised);
+      color: var(--ts-text-2);
       cursor: pointer;
     }
+    .chips button:hover {
+      border-color: var(--ts-border-hover);
+      color: var(--ts-text);
+    }
     .chips button.on {
-      background: #111827;
-      color: #fff;
+      border-color: var(--ts-text);
+      background: var(--ts-text);
+      color: var(--ts-surface);
     }
     .chips button.map {
-      border-color: #db2777;
-      color: #be185d;
+      border-color: var(--ts-accent);
+      color: var(--ts-accent-text);
     }
     .item {
       display: flex;
       gap: 6px;
       align-items: baseline;
       margin: 0 6px;
-      padding: 1px 6px;
-      border-radius: 4px;
-      font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+      padding: 1px 8px;
+      border-radius: 5px;
+      font: 11px/1.6 var(--ts-mono);
     }
     .item:hover {
-      background: #fdf2f8;
+      background: var(--ts-accent-soft);
     }
     .item .label {
       flex: 1;
@@ -265,34 +274,34 @@ export class TexelscopeRegionView extends LitElement {
       white-space: nowrap;
     }
     .item.setting {
-      color: #9ca3af;
+      color: var(--ts-text-4);
     }
     .swatch {
       display: inline-block;
       width: 10px;
       height: 10px;
       margin-right: 4px;
-      border: 1px solid rgba(0, 0, 0, 0.2);
+      border: 1px solid var(--ts-swatch-border);
       border-radius: 2px;
       vertical-align: -1px;
     }
     .sub {
-      margin: 6px 12px 2px;
-      color: #9ca3af;
+      margin: 8px 14px 2px;
+      color: var(--ts-text-4);
       font-size: 11px;
     }
     .note,
     .empty {
-      padding: 6px 12px;
-      color: #6b7280;
+      padding: 6px 14px;
+      color: var(--ts-text-3);
     }
     .empty {
-      padding: 12px;
-      line-height: 1.6;
+      padding: 14px;
+      line-height: 1.65;
     }
     .error {
-      padding: 12px;
-      color: #991b1b;
+      padding: 14px;
+      color: var(--ts-red-text);
     }
   `;
 

@@ -46,7 +46,7 @@ export class TexelscopeRenderView extends LitElement {
       display: block;
       position: relative;
       overflow: hidden;
-      background: repeating-conic-gradient(#e4e6ea 0 25%, #f2f3f5 0 50%) 0 0 / 16px 16px;
+      background: repeating-conic-gradient(var(--ts-checker-a) 0 25%, var(--ts-checker-b) 0 50%) 0 0 / 16px 16px;
       cursor: crosshair;
       user-select: none;
     }
@@ -74,39 +74,43 @@ export class TexelscopeRenderView extends LitElement {
       place-items: center;
       padding: 24px;
       text-align: center;
-      color: #4b5563;
+      color: var(--ts-text-3);
       font-size: 14px;
       line-height: 1.5;
       white-space: pre-line;
     }
     .hud {
       position: absolute;
-      right: 8px;
-      bottom: 8px;
-      padding: 2px 6px;
-      border-radius: 4px;
-      background: rgba(17, 24, 39, 0.72);
-      color: #f9fafb;
-      font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+      right: 10px;
+      bottom: 10px;
+      padding: 3px 8px;
+      border: 1px solid var(--ts-glass-border);
+      border-radius: 6px;
+      background: var(--ts-glass);
+      backdrop-filter: blur(10px);
+      color: var(--ts-text);
+      font: 11px var(--ts-mono);
     }
     .legend {
       position: absolute;
-      top: 8px;
-      left: 8px;
-      right: 8px;
+      top: 10px;
+      left: 10px;
+      right: 10px;
       display: flex;
       flex-wrap: wrap;
       align-items: center;
       gap: 4px 8px;
-      padding: 5px 8px;
-      border-radius: 6px;
-      background: rgba(255, 255, 255, 0.94);
-      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
-      font: 12px system-ui, sans-serif;
-      color: #111827;
+      padding: 6px 10px;
+      border: 1px solid var(--ts-glass-border);
+      border-radius: 8px;
+      background: var(--ts-glass);
+      backdrop-filter: blur(10px);
+      box-shadow: var(--ts-shadow);
+      font: 12px var(--ts-sans);
+      color: var(--ts-text);
     }
     .legend code {
-      font: 600 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+      font: 600 12px var(--ts-mono);
     }
     .legend .ramp {
       display: inline-block;
@@ -116,30 +120,33 @@ export class TexelscopeRenderView extends LitElement {
       background: ${unsafeCSS(RAMP_CSS)};
     }
     .legend .dim {
-      color: #6b7280;
+      color: var(--ts-text-3);
     }
     .legend .error {
-      color: #991b1b;
+      color: var(--ts-red-text);
     }
     .legend button {
-      padding: 0 6px;
-      border: 1px solid #d1d5db;
+      padding: 0 7px;
+      border: 1px solid var(--ts-border-strong);
       border-radius: 4px;
-      background: #fff;
-      font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+      background: var(--ts-raised);
+      color: var(--ts-text-2);
+      font: 11px var(--ts-mono);
       cursor: pointer;
     }
     .legend button.on {
-      background: #111827;
-      color: #fff;
+      border-color: var(--ts-text);
+      background: var(--ts-text);
+      color: var(--ts-surface);
     }
     .legend .hide {
       margin-left: auto;
-      font-family: system-ui, sans-serif;
+      font-family: var(--ts-sans);
     }
     .hud.hint {
-      left: 8px;
-      font: 11.5px system-ui, sans-serif;
+      left: 10px;
+      color: var(--ts-text-2);
+      font: 11.5px var(--ts-sans);
       text-align: center;
       pointer-events: none;
     }
@@ -162,9 +169,13 @@ export class TexelscopeRenderView extends LitElement {
   #ox = 0;
   #oy = 0;
   #fitted = false;
+  /** Whether the image is still where fit() put it, so a new view size fits it again. */
+  #asFitted = true;
+  /** The view's size when it was last laid out. */
+  #size = { width: 0, height: 0 };
   #hover: [number, number] | null = null;
   #drag?: { x: number; y: number; ox: number; oy: number; moved: boolean; region: boolean; start: [number, number] };
-  #resize = new ResizeObserver(() => this.#draw());
+  #resize = new ResizeObserver(() => this.#resized());
 
   constructor() {
     super();
@@ -275,6 +286,24 @@ export class TexelscopeRenderView extends LitElement {
     this.#ox = (box.width - this.targetWidth * this.#scale) / 2;
     this.#oy = (box.height - this.targetHeight * this.#scale) / 2;
     this.#fitted = true;
+    this.#asFitted = true;
+    this.#draw();
+  }
+
+  /** Follows a change in the view's size, such as a pane's edge being dragged. */
+  #resized() {
+    const { width, height } = this.getBoundingClientRect();
+    const was = this.#size;
+    this.#size = { width, height };
+    if (this.#fitted && this.#asFitted) {
+      this.fit();
+      return;
+    }
+    // A zoomed or panned image keeps the same point in the middle of the view.
+    if (was.width && was.height) {
+      this.#ox += (width - was.width) / 2;
+      this.#oy += (height - was.height) / 2;
+    }
     this.#draw();
   }
 
@@ -296,6 +325,7 @@ export class TexelscopeRenderView extends LitElement {
     this.#ox = mx - ((mx - this.#ox) * next) / this.#scale;
     this.#oy = my - ((my - this.#oy) * next) / this.#scale;
     this.#scale = next;
+    this.#asFitted = false;
     this.#draw();
   }
 
@@ -318,6 +348,7 @@ export class TexelscopeRenderView extends LitElement {
       } else if (drag.moved) {
         this.#ox = drag.ox + dx;
         this.#oy = drag.oy + dy;
+        this.#asFitted = false;
       }
     }
     this.#draw();
@@ -390,9 +421,15 @@ export class TexelscopeRenderView extends LitElement {
       g.setLineDash([2, 3]);
       g.strokeRect(x, y, w.width * this.#scale, w.height * this.#scale);
       g.setLineDash([]);
-      g.font = '11px system-ui, sans-serif';
-      g.fillStyle = '#b45309';
-      g.fillText('inputs recorded here', x + 3, y - 4);
+      // The note sits on a dark pill, so it reads over any image in either theme.
+      const note = 'inputs recorded here';
+      g.font = '500 11px system-ui, sans-serif';
+      g.fillStyle = 'rgba(15, 18, 23, 0.8)';
+      g.beginPath();
+      g.roundRect(x, y - 19, g.measureText(note).width + 12, 16, 4);
+      g.fill();
+      g.fillStyle = '#fbbf24';
+      g.fillText(note, x + 6, y - 7);
     }
     if (this.region) {
       const [x, y] = toScreen(this.region.x, this.region.y);

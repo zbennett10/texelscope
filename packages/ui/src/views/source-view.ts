@@ -3,8 +3,10 @@ import { Compartment, EditorState, RangeSetBuilder, StateEffect, StateField } fr
 import { Decoration, EditorView, WidgetType, type DecorationSet } from '@codemirror/view';
 import { basicSetup } from 'codemirror';
 import { glsl } from '../glsl-language.js';
-import { wgsl } from '../wgsl-language.js';
+import type { Theme } from '../prefs.js';
+import { editorTheme, syntaxColors } from '../theme.js';
 import type { SourceSpan } from '../types.js';
+import { wgsl } from '../wgsl-language.js';
 
 /** A value shown after the end of a source line. */
 export interface InlineValue {
@@ -71,6 +73,7 @@ export class TexelscopeSourceView extends LitElement {
     values: { attribute: false },
     notRun: { attribute: false },
     language: { type: String },
+    theme: { type: String },
     error: { type: String },
   };
 
@@ -79,46 +82,21 @@ export class TexelscopeSourceView extends LitElement {
       display: grid;
       grid-template-rows: minmax(0, 1fr) auto;
       min-height: 0;
-      background: #fff;
+      background: var(--ts-code-bg);
     }
     .editor {
       min-height: 0;
       overflow: hidden;
     }
-    .cm-editor {
-      height: 100%;
-      font-size: 12.5px;
-    }
-    .cm-scroller {
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    }
-    .ts-highlight {
-      background: rgba(219, 39, 119, 0.16);
-      border-bottom: 2px solid #db2777;
-    }
-    .ts-line {
-      background: rgba(219, 39, 119, 0.05);
-    }
-    .ts-not-run {
-      opacity: 0.4;
-    }
-    .ts-inline {
-      margin-left: 1.5em;
-      padding: 0 6px;
-      border-radius: 3px;
-      background: #eef2ff;
-      color: #3730a3;
-      font-size: 11.5px;
-    }
     .error {
       max-height: 30%;
       overflow: auto;
       margin: 0;
-      padding: 6px 10px;
-      border-top: 1px solid #fecaca;
-      background: #fef2f2;
-      color: #991b1b;
-      font: 11.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+      padding: 8px 12px;
+      border-top: 1px solid var(--ts-red-border);
+      background: var(--ts-red-soft);
+      color: var(--ts-red-text);
+      font: 11.5px/1.5 var(--ts-mono);
       white-space: pre-wrap;
     }
   `;
@@ -130,8 +108,11 @@ export class TexelscopeSourceView extends LitElement {
   declare notRun: number[];
   /** The source's language, for highlighting. */
   declare language: 'wgsl' | 'glsl';
+  /** Picks CodeMirror's own light or dark styles, for the parts the editor theme leaves alone. */
+  declare theme: Theme;
   declare error: string;
   #highlighting = new Compartment();
+  #scheme = new Compartment();
 
   #view?: EditorView;
   #timer?: number;
@@ -145,6 +126,7 @@ export class TexelscopeSourceView extends LitElement {
     this.values = [];
     this.notRun = [];
     this.language = 'wgsl';
+    this.theme = 'dark';
     this.error = '';
   }
 
@@ -169,6 +151,9 @@ export class TexelscopeSourceView extends LitElement {
           doc: this.source,
           extensions: [
             basicSetup,
+            editorTheme,
+            syntaxColors,
+            this.#scheme.of(EditorView.darkTheme.of(this.theme === 'dark')),
             this.#highlighting.of(this.language === 'glsl' ? glsl : wgsl),
             marks,
             EditorView.updateListener.of((update) => {
@@ -177,8 +162,9 @@ export class TexelscopeSourceView extends LitElement {
           ],
         }),
       });
-    } else if (changed.has('language')) {
-      this.#view.dispatch({ effects: this.#highlighting.reconfigure(this.language === 'glsl' ? glsl : wgsl) });
+    } else {
+      if (changed.has('language')) this.#view.dispatch({ effects: this.#highlighting.reconfigure(this.language === 'glsl' ? glsl : wgsl) });
+      if (changed.has('theme')) this.#view.dispatch({ effects: this.#scheme.reconfigure(EditorView.darkTheme.of(this.theme === 'dark')) });
     }
     if (changed.has('source') && this.#view.state.doc.toString() !== this.source) {
       this.#external = true;

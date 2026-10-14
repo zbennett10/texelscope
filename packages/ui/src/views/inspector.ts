@@ -43,24 +43,25 @@ export class TexelscopeInspector extends LitElement {
     :host {
       display: block;
       overflow: auto;
-      background: #fafafa;
-      font: 12.5px/1.45 system-ui, sans-serif;
-      color: #111827;
+      background: var(--ts-surface-2);
+      font: 12.5px/1.5 var(--ts-sans);
+      color: var(--ts-text);
     }
     section {
-      padding: 10px 12px;
-      border-bottom: 1px solid #e5e7eb;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--ts-border);
     }
     h2 {
       display: flex;
       justify-content: space-between;
-      align-items: baseline;
-      margin: 0 0 6px;
-      font-size: 11px;
+      align-items: center;
+      gap: 8px;
+      margin: 0 0 8px;
+      font-size: 10.5px;
       font-weight: 600;
-      letter-spacing: 0.06em;
+      letter-spacing: 0.08em;
       text-transform: uppercase;
-      color: #6b7280;
+      color: var(--ts-text-3);
     }
     h2 button,
     h2 label {
@@ -72,36 +73,36 @@ export class TexelscopeInspector extends LitElement {
       margin: 10px 0 2px;
     }
     .why.versus p {
-      border-left-color: #2563eb;
-      background: #eff6ff;
+      border-left-color: var(--ts-blue);
+      background: var(--ts-blue-soft);
     }
     .compare {
-      background: #f8fafc;
+      background: var(--ts-compare);
     }
     .compare h3 {
-      margin: 10px 0 4px;
+      margin: 12px 0 4px;
       font-size: 11px;
       font-weight: 600;
-      color: #6b7280;
+      color: var(--ts-text-3);
     }
     .vs {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(0, auto) minmax(0, auto);
       gap: 2px 10px;
       align-items: baseline;
-      padding: 2px 4px;
-      border-radius: 4px;
-      font: 11.5px ui-monospace, SFMono-Regular, Menlo, monospace;
+      padding: 2px 6px;
+      border-radius: 5px;
+      font: 11.5px var(--ts-mono);
     }
     .vs:hover {
-      background: #eff6ff;
+      background: var(--ts-blue-soft);
     }
     .vs.same {
-      color: #9ca3af;
+      color: var(--ts-text-4);
     }
     .vs.head {
-      color: #6b7280;
-      font: 600 10.5px system-ui, sans-serif;
+      color: var(--ts-text-3);
+      font: 600 10.5px var(--ts-sans);
       text-align: right;
     }
     .vs .v {
@@ -113,48 +114,49 @@ export class TexelscopeInspector extends LitElement {
     }
     details summary {
       margin-top: 8px;
-      color: #4b5563;
+      color: var(--ts-text-2);
       cursor: pointer;
     }
     .why p {
       margin: 0 0 6px;
-      padding: 4px 8px;
-      border-left: 3px solid #db2777;
-      border-radius: 0 4px 4px 0;
-      background: #fdf2f8;
+      padding: 6px 10px;
+      border-left: 2px solid var(--ts-accent);
+      border-radius: 0 6px 6px 0;
+      background: var(--ts-accent-soft);
       font-size: 12.5px;
-      line-height: 1.5;
+      line-height: 1.55;
       cursor: default;
     }
     .why code {
-      padding: 0 3px;
-      border-radius: 3px;
-      background: rgba(17, 24, 39, 0.06);
-      font: 11.5px ui-monospace, SFMono-Regular, Menlo, monospace;
+      padding: 1px 4px;
+      border-radius: 4px;
+      background: var(--ts-code-chip);
+      font: 11.5px var(--ts-mono);
     }
     .intro {
-      margin: -2px 0 6px;
-      color: #6b7280;
+      margin: -2px 0 8px;
+      color: var(--ts-text-3);
       font-size: 11.5px;
-      line-height: 1.45;
+      line-height: 1.5;
     }
     .scope {
-      color: #9ca3af;
+      color: var(--ts-text-4);
     }
     .fold {
       display: block;
       width: 100%;
       margin: 1px 0;
-      padding: 3px 4px;
+      padding: 3px 6px;
       border: 0;
-      border-radius: 4px;
+      border-radius: 5px;
       background: none;
       text-align: left;
-      font: 600 11.5px ui-monospace, SFMono-Regular, Menlo, monospace;
-      color: #374151;
+      font: 600 11.5px var(--ts-mono);
+      color: var(--ts-text-2);
     }
     .fold:hover {
-      background: #f3f4f6;
+      border-color: transparent;
+      background: var(--ts-hover);
     }
     .fold .dim {
       margin-left: 6px;
@@ -163,103 +165,103 @@ export class TexelscopeInspector extends LitElement {
     .caret {
       display: inline-block;
       width: 12px;
-      color: #6b7280;
+      color: var(--ts-text-3);
     }
     .inside {
       margin-left: 9px;
       padding-left: 6px;
-      border-left: 1px solid #e5e7eb;
+      border-left: 1px solid var(--ts-border);
     }
     .badge.input {
-      background: #e0e7ff;
-      color: #3730a3;
+      background: var(--ts-input);
+      color: var(--ts-input-text);
     }
     .badge.buffer {
-      background: #f3f4f6;
-      color: #4b5563;
+      background: var(--ts-badge);
+      color: var(--ts-badge-text);
     }
     .badge.texture {
-      background: #f3e8ff;
-      color: #6b21a8;
+      background: var(--ts-texture);
+      color: var(--ts-texture-text);
     }
     .badge.let {
-      background: #ccfbf1;
-      color: #115e59;
+      background: var(--ts-let);
+      color: var(--ts-let-text);
     }
     .badge.var {
-      background: #fef3c7;
-      color: #92400e;
+      background: var(--ts-var);
+      color: var(--ts-var-text);
     }
     .empty {
-      padding: 24px 16px;
-      color: #6b7280;
-      line-height: 1.6;
+      padding: 28px 18px;
+      color: var(--ts-text-3);
+      line-height: 1.65;
     }
     .colors {
       display: grid;
       grid-template-columns: auto 1fr;
-      gap: 4px 10px;
+      gap: 6px 10px;
       align-items: center;
     }
     .swatch {
       width: 34px;
       height: 20px;
-      border-radius: 4px;
-      border: 1px solid rgba(0, 0, 0, 0.15);
-      background-image: linear-gradient(var(--c), var(--c)), repeating-conic-gradient(#ddd 0 25%, #fff 0 50%);
+      border-radius: 5px;
+      border: 1px solid var(--ts-swatch-border);
+      background-image: linear-gradient(var(--c), var(--c)), repeating-conic-gradient(var(--ts-swatch-a) 0 25%, var(--ts-swatch-b) 0 50%);
       background-size: auto, 8px 8px;
     }
     .mono {
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-family: var(--ts-mono);
       font-size: 11.5px;
     }
     .dim {
-      color: #6b7280;
+      color: var(--ts-text-3);
     }
     .badge {
       display: inline-block;
-      padding: 0 5px;
-      border-radius: 3px;
+      padding: 0 6px;
+      border-radius: 4px;
       font-size: 10.5px;
       font-weight: 600;
-      background: #e5e7eb;
-      color: #374151;
+      background: var(--ts-badge);
+      color: var(--ts-badge-text);
     }
     .badge.ok {
-      background: #dcfce7;
-      color: #166534;
+      background: var(--ts-green-soft);
+      color: var(--ts-green-text);
     }
     .badge.warn {
-      background: #fee2e2;
-      color: #991b1b;
+      background: var(--ts-red-soft);
+      color: var(--ts-red-text);
     }
     .row {
       display: grid;
       grid-template-columns: 54px minmax(56px, 1fr) minmax(0, auto);
       gap: 2px 8px;
       align-items: baseline;
-      padding: 3px 4px;
-      border-radius: 4px;
+      padding: 3px 6px;
+      border-radius: 5px;
       cursor: default;
     }
     .row:hover,
     .row.active {
-      background: #fdf2f8;
+      background: var(--ts-accent-soft);
     }
     .row .detail {
       grid-column: 2 / 4;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      color: #6b7280;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: var(--ts-text-3);
+      font-family: var(--ts-mono);
       font-size: 11px;
     }
     .name {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-family: var(--ts-mono);
       font-size: 11.5px;
     }
     .value {
@@ -268,7 +270,7 @@ export class TexelscopeInspector extends LitElement {
       justify-content: flex-end;
       gap: 6px;
       min-width: 0;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-family: var(--ts-mono);
       font-size: 11.5px;
     }
     .value .v {
@@ -279,15 +281,22 @@ export class TexelscopeInspector extends LitElement {
     button {
       font: inherit;
       font-size: 11px;
-      padding: 1px 7px;
-      border: 1px solid #d1d5db;
-      border-radius: 4px;
-      background: #fff;
-      color: #374151;
+      padding: 1px 8px;
+      border: 1px solid var(--ts-border-strong);
+      border-radius: 5px;
+      background: var(--ts-raised);
+      color: var(--ts-text-2);
       cursor: pointer;
+      transition: background-color 0.15s, border-color 0.15s, color 0.15s;
     }
     button:hover {
-      border-color: #9ca3af;
+      border-color: var(--ts-border-hover);
+      background: var(--ts-raised-hover);
+      color: var(--ts-text);
+    }
+    button:focus-visible {
+      outline: 2px solid var(--ts-focus);
+      outline-offset: 1px;
     }
     .decision {
       grid-template-columns: minmax(0, 1fr) auto;
@@ -307,36 +316,41 @@ export class TexelscopeInspector extends LitElement {
     }
     .bars span {
       width: 6px;
+      border-radius: 1px;
       background: currentColor;
     }
     input.pin {
       width: 100%;
       box-sizing: border-box;
-      font: 11.5px ui-monospace, SFMono-Regular, Menlo, monospace;
-      padding: 2px 4px;
-      border: 1px solid #db2777;
-      border-radius: 3px;
+      font: 11.5px var(--ts-mono);
+      padding: 2px 6px;
+      border: 1px solid var(--ts-accent);
+      border-radius: 4px;
+      outline: none;
+      background: var(--ts-raised);
+      color: var(--ts-text);
+      box-shadow: 0 0 0 3px var(--ts-accent-soft);
     }
     .steps {
       max-height: 340px;
       overflow: auto;
-      border: 1px solid #e5e7eb;
-      border-radius: 4px;
-      background: #fff;
+      border: 1px solid var(--ts-border);
+      border-radius: 6px;
+      background: var(--ts-surface);
     }
     .step {
       display: grid;
       grid-template-columns: 34px minmax(0, 1fr) auto;
       gap: 6px;
-      padding: 1px 6px;
-      font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+      padding: 1px 8px;
+      font: 11px/1.65 var(--ts-mono);
       cursor: pointer;
     }
     .step:hover {
-      background: #f3f4f6;
+      background: var(--ts-hover);
     }
     .step.active {
-      background: #fce7f3;
+      background: var(--ts-accent-hover);
     }
     .step .text {
       overflow: hidden;
@@ -344,7 +358,7 @@ export class TexelscopeInspector extends LitElement {
       white-space: nowrap;
     }
     .error {
-      color: #991b1b;
+      color: var(--ts-red-text);
       white-space: pre-wrap;
     }
     input[type='range'] {
@@ -641,7 +655,7 @@ export class TexelscopeInspector extends LitElement {
   #sensitivities(e: Explanation) {
     if (e.sensitivities.length === 0) return nothing;
     const peak = Math.max(...e.sensitivities.flatMap((s) => s.dColor.map(Math.abs)), 1e-9);
-    const channel = ['#dc2626', '#16a34a', '#2563eb', '#6b7280'];
+    const channel = ['var(--ts-ch-r)', 'var(--ts-ch-g)', 'var(--ts-ch-b)', 'var(--ts-ch-a)'];
     return html`<section>
       <h2>Moves the color most</h2>
       <p class="intro">The inputs that change the color most when nudged. Bars show how much red, green, blue and alpha move.</p>
