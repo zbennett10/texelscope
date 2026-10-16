@@ -93,6 +93,8 @@ pub(crate) struct Lane<'a> {
     /// The quad's operands, handed back when the lane resumes.
     resume: Option<[Option<Val>; 4]>,
     executed: u64,
+    /// How many times the tests of limited loops ran.
+    turns: u32,
     pub(crate) state: State,
     pub(crate) notes: Vec<String>,
     pub(crate) outputs: Vec<crate::inputs::RawOutput>,
@@ -123,6 +125,7 @@ impl<'a> Lane<'a> {
             record,
             resume: None,
             executed: 0,
+            turns: 0,
             state: State::Running,
             notes: Vec::new(),
             outputs: Vec::new(),
@@ -198,17 +201,30 @@ impl<'a> Lane<'a> {
                     condition,
                     otherwise,
                     internal,
+                    exit,
                 } => {
                     let kind = if *internal {
                         None
                     } else {
                         Some(BranchKind::If)
                     };
-                    let taken = self.decide(*condition, pc, kind)?;
+                    let mut taken = self.decide(*condition, pc, kind)?;
+                    if let Some(leaves) = *exit
+                        && self.turn()
+                    {
+                        taken = leaves;
+                    }
                     self.top_mut().pc = if taken { pc + 1 } else { *otherwise as usize };
                 }
-                Op::BreakIf { condition, start } => {
-                    let leave = self.decide(*condition, pc, Some(BranchKind::BreakIf))?;
+                Op::BreakIf {
+                    condition,
+                    start,
+                    limited,
+                } => {
+                    let mut leave = self.decide(*condition, pc, Some(BranchKind::BreakIf))?;
+                    if *limited && self.turn() {
+                        leave = true;
+                    }
                     self.top_mut().pc = if leave { pc + 1 } else { *start as usize };
                 }
                 Op::Switch { selector, cases } => {
@@ -244,6 +260,20 @@ impl<'a> Lane<'a> {
         }
         self.state = State::Done;
         Ok(())
+    }
+
+    /// Counts a turn of a limited loop. Returns whether the loops have used up `LOOP_LIMIT`,
+    /// which ends the loop, as the GLSL a WebGL2 app runs for an edit does.
+    fn turn(&mut self) -> bool {
+        self.turns += 1;
+        let over = self.turns > texelscope_ir::LOOP_LIMIT;
+        if self.turns == texelscope_ir::LOOP_LIMIT + 1 {
+            self.notes.push(format!(
+                "The loops stopped after {} turns, as they do when your app runs an edit.",
+                texelscope_ir::LOOP_LIMIT
+            ));
+        }
+        over
     }
 
     fn tick(&mut self) -> Result<(), InterpError> {

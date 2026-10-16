@@ -37,7 +37,7 @@ export class Engine {
     return this.#call<Explanation>('explain', x, y, overrides);
   }
   probe(expr: ExprRef, overrides: Override[]) {
-    return this.#call<{ wgsl: string; components: number }>('probe', expr, overrides);
+    return this.#call<{ source: string; components: number }>('probe', expr, overrides);
   }
   compare(a: [number, number], b: [number, number], overrides: Override[]) {
     return this.#call<Comparison>('compare', a, b, overrides);

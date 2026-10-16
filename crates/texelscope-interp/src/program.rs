@@ -17,16 +17,20 @@ pub(crate) enum Op {
     },
     Jump(u32),
     /// Falls through when the condition holds and jumps to `otherwise` when it does not.
-    /// `internal` marks the branches naga adds to short-circuit `&&` and `||`.
+    /// `internal` marks the branches naga adds to short-circuit `&&` and `||`. `exit` marks
+    /// a loop's test that `LOOP_LIMIT` applies to, with the way that leaves the loop.
     Branch {
         condition: Handle<Expression>,
         otherwise: u32,
         internal: bool,
+        exit: Option<bool>,
     },
-    /// Ends one loop iteration. Leaves the loop when the condition holds.
+    /// Ends one loop iteration. Leaves the loop when the condition holds, and once the loops
+    /// have turned `LOOP_LIMIT` times when `limited`.
     BreakIf {
         condition: Handle<Expression>,
         start: u32,
+        limited: bool,
     },
     Switch {
         selector: Handle<Expression>,
@@ -82,8 +86,18 @@ pub(crate) fn compile(
     name: &str,
     f: &naga::Function,
 ) -> Compiled {
+    let exits = module
+        .loop_exits()
+        .into_iter()
+        .filter(|e| e.condition.function == function)
+        .filter_map(|e| {
+            let (handle, _) = f.expressions.iter().nth(e.condition.expr as usize)?;
+            Some((handle, e.exits_when))
+        })
+        .collect();
     let mut builder = Builder {
         function: Some(f),
+        exits,
         ..Builder::default()
     };
     builder.block(&f.body, None);
@@ -146,6 +160,8 @@ struct Builder<'f> {
     breaks: Vec<Vec<usize>>,
     /// Jumps waiting for the continuing block of the innermost loop.
     continues: Vec<Vec<usize>>,
+    /// The loop tests `LOOP_LIMIT` applies to, with the way each leaves its loop.
+    exits: HashMap<Handle<Expression>, bool>,
 }
 
 impl Builder<'_> {
@@ -250,6 +266,7 @@ impl Builder<'_> {
                         condition: *condition,
                         otherwise: 0,
                         internal,
+                        exit: self.exits.get(condition).copied(),
                     },
                     guard,
                     span,
@@ -315,6 +332,7 @@ impl Builder<'_> {
                         Op::BreakIf {
                             condition: *condition,
                             start,
+                            limited: self.exits.contains_key(condition),
                         },
                         guard,
                         None,

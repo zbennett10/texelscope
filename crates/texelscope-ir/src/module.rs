@@ -123,6 +123,19 @@ pub enum ResourceKind {
     Other,
 }
 
+/// How many turns one invocation's loops may take in all, when a WebGL2 app runs an edit.
+/// The GLSL it runs counts the turns, and so does the interpreter for GLSL, so an edit or
+/// what-if that keeps a loop going ends the same way on both, without hanging the app's GPU.
+pub const LOOP_LIMIT: u32 = 16384;
+
+/// The test that ends a loop, which [`LOOP_LIMIT`] applies to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoopExit {
+    pub condition: ExprRef,
+    /// Whether the loop ends when the condition is true.
+    pub exits_when: bool,
+}
+
 /// A user-defined input of a fragment entry point.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -168,7 +181,9 @@ impl ShaderModule {
             None => span,
         };
         remap_spans(&mut module, &map);
+        cover_accessed(&mut module, &source);
         cover_operands(&mut module, &source);
+        cover_parentheses(&mut module, &source);
         name_uniforms(&mut module, &converted.layout);
         Ok(Self {
             source,
@@ -535,6 +550,57 @@ impl ShaderModule {
         }
     }
 
+    /// The GLSL spelling of a scalar, vector or matrix type.
+    pub fn glsl_type(&self, inner: &naga::TypeInner) -> String {
+        let prefix = |s: naga::Scalar| match s.kind {
+            naga::ScalarKind::Bool => "b",
+            naga::ScalarKind::Sint => "i",
+            naga::ScalarKind::Uint => "u",
+            _ => "",
+        };
+        match *inner {
+            naga::TypeInner::Scalar(s) => match s.kind {
+                naga::ScalarKind::Bool => "bool",
+                naga::ScalarKind::Sint => "int",
+                naga::ScalarKind::Uint => "uint",
+                _ => "float",
+            }
+            .to_string(),
+            naga::TypeInner::Vector { size, scalar } => {
+                format!("{}vec{}", prefix(scalar), size as u8)
+            }
+            naga::TypeInner::Matrix { columns, rows, .. } if columns == rows => {
+                format!("mat{}", columns as u8)
+            }
+            naga::TypeInner::Matrix { columns, rows, .. } => {
+                format!("mat{}x{}", columns as u8, rows as u8)
+            }
+            ref other => format!("{other:?}"),
+        }
+    }
+
+    /// The spelling of a scalar, vector or matrix type in the source's language.
+    pub fn type_name(&self, inner: &naga::TypeInner) -> String {
+        match self.language() {
+            Language::Wgsl => self.wgsl_type(inner),
+            Language::Glsl => self.glsl_type(inner),
+        }
+    }
+
+    /// The test of each loop that [`LOOP_LIMIT`] applies to, for GLSL: the first `if` at the
+    /// top of a loop's body that leaves it, or else its `break if`. Only tests with a place in
+    /// the source count, since the GLSL that runs counts turns there.
+    pub fn loop_exits(&self) -> Vec<LoopExit> {
+        if self.language() != Language::Glsl {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for (function, _, f) in self.functions() {
+            loop_exits(self, function, &f.body, &mut out);
+        }
+        out
+    }
+
     /// The 1-based line and column of a byte offset.
     pub fn line_col(&self, offset: u32) -> LineCol {
         let prefix = self.source.get(..offset as usize).unwrap_or(&self.source);
@@ -591,6 +657,59 @@ impl ShaderModule {
     }
 }
 
+fn loop_exits(
+    module: &ShaderModule,
+    function: FunctionRef,
+    block: &naga::Block,
+    out: &mut Vec<LoopExit>,
+) {
+    use naga::Statement as S;
+    let leaves = |b: &naga::Block| b.iter().any(|s| matches!(s, S::Break | S::Return { .. }));
+    for statement in block.iter() {
+        match statement {
+            S::Loop {
+                body,
+                continuing,
+                break_if,
+            } => {
+                let test = body.iter().find_map(|s| match s {
+                    S::If {
+                        condition,
+                        accept,
+                        reject,
+                    } if leaves(accept) || leaves(reject) => Some((*condition, leaves(accept))),
+                    _ => None,
+                });
+                if let Some((condition, exits_when)) = test.or(break_if.map(|c| (c, true))) {
+                    let condition = ExprRef {
+                        function,
+                        expr: condition.index() as u32,
+                    };
+                    if module.span_of(condition).is_some_and(|s| s.end > s.start) {
+                        out.push(LoopExit {
+                            condition,
+                            exits_when,
+                        });
+                    }
+                }
+                loop_exits(module, function, body, out);
+                loop_exits(module, function, continuing, out);
+            }
+            S::Block(inner) => loop_exits(module, function, inner, out),
+            S::If { accept, reject, .. } => {
+                loop_exits(module, function, accept, out);
+                loop_exits(module, function, reject, out);
+            }
+            S::Switch { cases, .. } => {
+                for case in cases {
+                    loop_exits(module, function, &case.body, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// The expressions of a block that run as steps: those it emits and the results of its calls.
 fn recorded_expressions(block: &naga::Block, out: &mut Vec<naga::Handle<naga::Expression>>) {
     use naga::Statement as S;
@@ -642,6 +761,154 @@ fn remap_spans(module: &mut naga::Module, map: &dyn Fn(naga::Span) -> naga::Span
         }
         remap_block(&mut f.body, map);
     }
+}
+
+/// Takes in the parentheses a span opens or closes without the other half. naga's GLSL front
+/// end ends `a * (b + c)` at `c`, which leaves the text a pin would replace unbalanced.
+fn cover_parentheses(module: &mut naga::Module, source: &str) {
+    let bytes = source.as_bytes();
+    let functions = module
+        .functions
+        .iter_mut()
+        .map(|(_, f)| f)
+        .chain(module.entry_points.iter_mut().map(|ep| &mut ep.function));
+    for f in functions {
+        let old = std::mem::take(&mut f.expressions);
+        for (handle, expression) in old.iter() {
+            let span = match old.get_span(handle).to_range() {
+                Some(r) => {
+                    let r = balanced(bytes, r);
+                    naga::Span::new(r.start as u32, r.end as u32)
+                }
+                None => naga::Span::UNDEFINED,
+            };
+            f.expressions.append(expression.clone(), span);
+        }
+    }
+}
+
+/// A range widened over the brackets just outside it that close or open the ones inside.
+fn balanced(bytes: &[u8], range: std::ops::Range<usize>) -> std::ops::Range<usize> {
+    let Some(text) = bytes.get(range.clone()) else {
+        return range;
+    };
+    let (mut start, mut end) = (range.start, range.end);
+    let mut depth = 0i32;
+    let mut lowest = 0i32;
+    for &b in text {
+        match b {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            _ => {}
+        }
+        lowest = lowest.min(depth);
+    }
+    // Closers the text needs on its right, and openers it needs on its left.
+    let mut closers = depth - lowest;
+    let mut openers = -lowest;
+    let (old_start, old_end) = (start, end);
+    while closers > 0 {
+        while bytes.get(end).is_some_and(u8::is_ascii_whitespace) {
+            end += 1;
+        }
+        if bytes.get(end) != Some(&b')') {
+            return range;
+        }
+        end += 1;
+        closers -= 1;
+    }
+    while openers > 0 {
+        while start > 0 && bytes[start - 1].is_ascii_whitespace() {
+            start -= 1;
+        }
+        if start == 0 || bytes[start - 1] != b'(' {
+            return old_start..old_end;
+        }
+        start -= 1;
+        openers -= 1;
+    }
+    start..end
+}
+
+/// Starts each expression's span at what a `.` or `[` it starts with applies to. naga's GLSL
+/// front end starts a member or index access there, so `v.x > 0.5 ? a : b` would lose its `v`.
+fn cover_accessed(module: &mut naga::Module, source: &str) {
+    let functions = module
+        .functions
+        .iter_mut()
+        .map(|(_, f)| f)
+        .chain(module.entry_points.iter_mut().map(|ep| &mut ep.function));
+    for f in functions {
+        let old = std::mem::take(&mut f.expressions);
+        for (handle, expression) in old.iter() {
+            let span = match old.get_span(handle).to_range() {
+                Some(r) => naga::Span::new(
+                    accessed_start(source.as_bytes(), r.start) as u32,
+                    r.end as u32,
+                ),
+                None => naga::Span::UNDEFINED,
+            };
+            f.expressions.append(expression.clone(), span);
+        }
+    }
+}
+
+/// Where the access starting at `start` begins, if a `.` or `[` is there: back over the
+/// name, call or indexed value before it, and any accesses before that.
+fn accessed_start(bytes: &[u8], mut start: usize) -> usize {
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let skip_space = |mut at: usize| {
+        while at > 0 && bytes[at - 1].is_ascii_whitespace() {
+            at -= 1;
+        }
+        at
+    };
+    while matches!(bytes.get(start), Some(b'.' | b'[')) {
+        let mut at = skip_space(start);
+        match at.checked_sub(1).map(|i| bytes[i]) {
+            Some(b')' | b']') => {
+                let Some(open) = opener(bytes, at - 1) else {
+                    break;
+                };
+                at = open;
+                while at > 0 && ident(bytes[at - 1]) {
+                    at -= 1;
+                }
+            }
+            Some(b) if ident(b) => {
+                while at > 0 && ident(bytes[at - 1]) {
+                    at -= 1;
+                }
+            }
+            _ => break,
+        }
+        // `a.b` reached from `.c` goes on through the `.` before `b`.
+        let before = skip_space(at);
+        start = if before > 0 && bytes[before - 1] == b'.' {
+            before - 1
+        } else {
+            at
+        };
+    }
+    start
+}
+
+/// The `(` or `[` that the bracket at `close` closes.
+fn opener(bytes: &[u8], close: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for at in (0..=close).rev() {
+        match bytes[at] {
+            b')' | b']' => depth += 1,
+            b'(' | b'[' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(at);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Widens each expression's span to take in operands on its own line. naga's GLSL front end

@@ -8,11 +8,14 @@ mod module;
 mod overrides;
 mod value;
 
-pub use glsl::{GlslInput, GlslLayout, GlslUniform, GlslUniformKind};
+pub use glsl::{
+    GlslInput, GlslLayout, GlslOutline, GlslUniform, GlslUniformKind, outline as glsl_outline,
+    uses as glsl_uses,
+};
 pub use ids::{ExprRef, FunctionRef, LineCol, SourceSpan};
 pub use module::{
-    EntryPointInfo, IrError, Language, NamedValue, NamedValueKind, ResourceInfo, ResourceKind,
-    ShaderModule, Stage, StageInput,
+    EntryPointInfo, IrError, LOOP_LIMIT, Language, LoopExit, NamedValue, NamedValueKind,
+    ResourceInfo, ResourceKind, ShaderModule, Stage, StageInput,
 };
 pub use overrides::Override;
 pub use value::Value;

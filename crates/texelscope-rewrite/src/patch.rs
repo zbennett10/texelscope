@@ -2,8 +2,10 @@ use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use texelscope_capture::Rect;
-use texelscope_ir::naga::{Expression, ScalarKind, TypeInner};
-use texelscope_ir::{ExprRef, Override, ShaderModule, SourceSpan, Value};
+use texelscope_ir::naga::{Expression, ScalarKind, TypeInner, UnaryOperator};
+use texelscope_ir::{
+    ExprRef, FunctionRef, Language, Override, ShaderModule, SourceSpan, Value, glsl_uses,
+};
 
 use crate::RewriteError;
 
@@ -19,18 +21,35 @@ pub struct Patch {
 /// Applies a patch and returns the rewritten module, which still validates. The GPU sees
 /// the whole frame patched, so a region limits only the interpreter.
 pub fn apply(module: &ShaderModule, patch: &Patch) -> Result<ShaderModule, RewriteError> {
-    let source = patch_source(module, &patch.overrides)?;
-    ShaderModule::from_wgsl(source).map_err(|e| RewriteError::Emit {
-        target: "patched WGSL",
+    reparse(module, patch_source(module, &patch.overrides)?)
+}
+
+/// Parses a rewrite of `module`'s source in the same language.
+pub(crate) fn reparse(module: &ShaderModule, source: String) -> Result<ShaderModule, RewriteError> {
+    ShaderModule::from_language(module.language(), source).map_err(|e| RewriteError::Emit {
+        target: match module.language() {
+            Language::Wgsl => "patched WGSL",
+            Language::Glsl => "patched GLSL",
+        },
         message: e.to_string(),
     })
 }
 
 /// Rewrites the source so each override holds: a pinned expression becomes a literal, a
 /// forced condition becomes `true` or `false` and a replacement takes the expression's place.
-/// A pinned parameter is renamed, and a `let` with its name opens the function body.
+/// A pinned parameter is renamed, and a `let` with its name opens the function body, or in
+/// GLSL a local of its type.
 pub fn patch_source(module: &ShaderModule, overrides: &[Override]) -> Result<String, RewriteError> {
     Ok(apply_edits(module.source(), &edits(module, overrides)?))
+}
+
+/// The source the GPU runs for a set of what-ifs: patched WGSL for Texelscope's replay, or
+/// GLSL ES for the app's own WebGL2 context, with every loop limited as well.
+pub fn gpu_source(module: &ShaderModule, overrides: &[Override]) -> Result<String, RewriteError> {
+    match module.language() {
+        Language::Wgsl => patch_source(module, overrides),
+        Language::Glsl => crate::replay_glsl(module, overrides),
+    }
 }
 
 /// One replacement of a span of the source, the unit a patch is made of.
@@ -48,7 +67,7 @@ pub(crate) fn edits(
         let (expr, text) = match o {
             Override::Pin { expr, value } => {
                 let ty = module.type_of(*expr).ok_or_else(|| unknown(expr.expr))?;
-                (*expr, literal(module, value, ty)?)
+                (*expr, literal(module, &spelled(module, *expr, value), ty)?)
             }
             Override::ForceBranch { condition, taken } => {
                 let ty = module
@@ -60,10 +79,22 @@ pub(crate) fn edits(
                         condition.expr
                     )));
                 }
+                let taken = spelled(module, *condition, &Value::Bool(*taken));
                 (*condition, taken.to_string())
             }
             Override::Replace { expr, wgsl } => (*expr, format!("({wgsl})")),
         };
+        // A GLSL input reaches `main` through the entry point naga adds, so its uses take the value.
+        if let Some(name) = glsl_input(module, expr) {
+            for range in glsl_uses(module.source(), &name) {
+                let span = SourceSpan {
+                    start: range.start as u32,
+                    end: range.end as u32,
+                };
+                edits.push((span, text.clone()));
+            }
+            continue;
+        }
         let span = module.span_of(expr).ok_or_else(|| {
             RewriteError::Unsupported(format!(
                 "expression {} has no place in the source to patch",
@@ -71,7 +102,8 @@ pub(crate) fn edits(
             ))
         })?;
         if !is_parameter(module, expr) {
-            edits.push((span, text));
+            let text = as_declared(module, span, text);
+            edits.push((span, assigned(module, span, text)?));
             continue;
         }
         let source = module.source();
@@ -81,9 +113,16 @@ pub(crate) fn edits(
         let name = module.text(span);
         let renamed = fresh_name(source, &format!("{name}_unpinned"), &mut names);
         edits.push((span, renamed));
+        let declared = match module.language() {
+            Language::Wgsl => format!(" let {name} = {text};"),
+            Language::Glsl => {
+                let ty = module.type_of(expr).ok_or_else(|| unknown(expr.expr))?;
+                format!(" {} {name} = {text};", module.glsl_type(ty))
+            }
+        };
         lets.entry(brace)
             .or_insert_with(|| "{".to_string())
-            .push_str(&format!(" let {name} = {text};"));
+            .push_str(&declared);
     }
     for (brace, text) in lets {
         edits.push((
@@ -153,14 +192,20 @@ pub(crate) fn follow(
     })
 }
 
-/// A WGSL expression for a constant of the given type.
+/// An expression for a constant of the given type, in the source's language.
 fn literal(module: &ShaderModule, value: &Value, ty: &TypeInner) -> Result<String, RewriteError> {
+    let glsl = module.language() == Language::Glsl;
     let scalar = |v: &Value| -> Result<String, RewriteError> {
         Ok(match v {
             Value::Bool(b) => b.to_string(),
+            // GLSL has no literal for the lowest int, since its digits overflow before the minus.
+            Value::I32(i32::MIN) if glsl => "int(-2147483647 - 1)".to_string(),
+            Value::I32(i) if glsl => format!("int({i})"),
             Value::I32(i) => format!("i32({i})"),
             Value::U32(u) => format!("{u}u"),
+            Value::F32(f) if f.is_finite() && glsl => format!("float({f:?})"),
             Value::F32(f) if f.is_finite() => format!("f32({f:?})"),
+            Value::F32(f) if glsl => format!("uintBitsToFloat({}u)", f.to_bits()),
             Value::F32(f) => format!("bitcast<f32>({}u)", f.to_bits()),
             other => {
                 return Err(RewriteError::Unsupported(format!(
@@ -184,13 +229,111 @@ fn literal(module: &ShaderModule, value: &Value, ty: &TypeInner) -> Result<Strin
                     other => scalar(other),
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(format!("{}({})", module.wgsl_type(ty), parts.join(", ")))
+            Ok(format!("{}({})", module.type_name(ty), parts.join(", ")))
         }
         _ => Err(RewriteError::Unsupported(format!(
             "pinning a {} is not supported yet",
-            module.wgsl_type(ty)
+            module.type_name(ty)
         ))),
     }
+}
+
+/// The value to write where an expression's text is. naga's GLSL front end tests a loop's
+/// condition through a `!` of its own, spanned like the condition, so that text is negated.
+pub(crate) fn spelled(module: &ShaderModule, expr: ExprRef, value: &Value) -> Value {
+    match value {
+        Value::Bool(b) if is_hidden_not(module, expr) => Value::Bool(!b),
+        other => other.clone(),
+    }
+}
+
+/// Whether an expression is a `!` the GLSL front end added, with no text of its own.
+pub(crate) fn is_hidden_not(module: &ShaderModule, expr: ExprRef) -> bool {
+    let Some((f, h)) = module.expression(expr) else {
+        return false;
+    };
+    match f.expressions[h] {
+        Expression::Unary {
+            op: UnaryOperator::LogicalNot,
+            expr: operand,
+        } => f.expressions.get_span(h) == f.expressions.get_span(operand),
+        _ => false,
+    }
+}
+
+/// A value for the use of a GLSL bool uniform, which reads a bool in the source though naga
+/// holds it as unsigned ints.
+fn as_declared(module: &ShaderModule, span: SourceSpan, text: String) -> String {
+    let code = module.text(span).trim();
+    let bool_use = module.glsl_layout().and_then(|layout| {
+        layout.uniforms.iter().find_map(|u| {
+            let named = code == u.name
+                || code
+                    .strip_prefix(u.name.as_str())
+                    .is_some_and(|rest| rest.trim_start().starts_with('['));
+            u.boolean.as_ref().filter(|_| named)
+        })
+    });
+    match bool_use {
+        Some(ty) => format!("{ty}({text})"),
+        None => text,
+    }
+}
+
+/// The text that gives `span` the value `text` spells. In GLSL a span can cover an
+/// assignment, such as a compound `x += y` or a declared `x = y`, which then assigns the value.
+pub(crate) fn assigned(
+    module: &ShaderModule,
+    span: SourceSpan,
+    text: String,
+) -> Result<String, RewriteError> {
+    if module.language() != Language::Glsl {
+        return Ok(text);
+    }
+    let code = module.text(span);
+    if matches!(code.trim(), "++" | "--") {
+        return Err(RewriteError::Unsupported(
+            "an increment can't be pinned on the GPU yet".to_string(),
+        ));
+    }
+    Ok(match assignment(code) {
+        Some(op) => format!("{} = {text}", code[..op].trim_end()),
+        None => text,
+    })
+}
+
+/// Where the assignment operator of a GLSL assignment starts, `=` or a compound one such as
+/// `+=`, outside any brackets.
+pub(crate) fn assignment(code: &str) -> Option<usize> {
+    let bytes = code.as_bytes();
+    let mut depth = 0i32;
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth -= 1,
+            b'=' if depth == 0 => {
+                let next = bytes.get(i + 1).copied();
+                let prev = i.checked_sub(1).map(|p| bytes[p]);
+                if next == Some(b'=') || matches!(prev, Some(b'=' | b'!')) {
+                    continue;
+                }
+                // `<=` and `>=` compare, but `<<=` and `>>=` assign.
+                if matches!(prev, Some(b'<' | b'>')) {
+                    let shift = i >= 2 && bytes[i - 2] == prev.unwrap();
+                    if !shift {
+                        continue;
+                    }
+                    return Some(i - 2);
+                }
+                return Some(match prev {
+                    Some(b'+' | b'-' | b'*' | b'/' | b'%' | b'&' | b'|' | b'^') => i - 1,
+                    _ => i,
+                });
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// The last override of each expression, in their original order.
@@ -205,6 +348,26 @@ fn latest(overrides: &[Override]) -> Vec<&Override> {
     kept
 }
 
+/// The GLSL input an argument of the entry point naga adds is stored into.
+pub(crate) fn glsl_input(module: &ShaderModule, expr: ExprRef) -> Option<String> {
+    if module.language() != Language::Glsl || !matches!(expr.function, FunctionRef::EntryPoint(_)) {
+        return None;
+    }
+    let (f, h) = module.expression(expr)?;
+    if !matches!(f.expressions[h], Expression::FunctionArgument(_)) {
+        return None;
+    }
+    f.body.iter().find_map(|s| match *s {
+        texelscope_ir::naga::Statement::Store { pointer, value } if value == h => {
+            match f.expressions[pointer] {
+                Expression::GlobalVariable(g) => module.naga().global_variables[g].name.clone(),
+                _ => None,
+            }
+        }
+        _ => None,
+    })
+}
+
 fn is_parameter(module: &ShaderModule, expr: ExprRef) -> bool {
     module
         .expression(expr)
@@ -213,7 +376,7 @@ fn is_parameter(module: &ShaderModule, expr: ExprRef) -> bool {
 
 /// The offset of the `{` that opens the body of the function whose parameter list
 /// contains `from`.
-fn body_start(source: &str, from: usize) -> Option<u32> {
+pub(crate) fn body_start(source: &str, from: usize) -> Option<u32> {
     let bytes = source.as_bytes();
     let mut depth = 1u32;
     let mut at = from;

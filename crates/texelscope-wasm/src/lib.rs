@@ -105,7 +105,7 @@ impl Session {
         Ok(serde_json::to_string(&trace)?)
     }
 
-    /// The shader rewritten to output one value at every pixel, as JSON with `wgsl` and
+    /// The shader rewritten to output one value at every pixel, as JSON with `source` and
     /// `components`. `expr` is a JSON expression reference and `overrides` a JSON array.
     #[wasm_bindgen(js_name = probeSource)]
     pub fn probe_source(&self, expr: &str, overrides: &str) -> Result<String, JsError> {
@@ -202,10 +202,11 @@ impl Session {
         Ok(texture.bytes())
     }
 
-    /// The source with overrides written into it, for replaying them on the GPU.
+    /// The source with overrides written into it, for replaying them on the GPU. GLSL comes
+    /// back for the app's own context, with every loop limited.
     #[wasm_bindgen(js_name = patchedSource)]
     pub fn patched_source(&self, overrides: &str) -> Result<String, JsError> {
-        Ok(texelscope_rewrite::patch_source(
+        Ok(texelscope_rewrite::gpu_source(
             self.interp.module(),
             &parse_overrides(overrides)?,
         )?)

@@ -6,7 +6,7 @@ use texelscope_ir::naga::{
     self, AddressSpace, Arena, Binding, Block, Expression, FunctionResult, GlobalVariable, Handle,
     Literal, Scalar, ScalarKind, Span, Statement, Type, TypeInner, VectorSize,
 };
-use texelscope_ir::{ExprRef, FunctionRef, Override, ShaderModule};
+use texelscope_ir::{ExprRef, FunctionRef, Language, Override, ShaderModule};
 
 use crate::RewriteError;
 use crate::patch;
@@ -20,32 +20,31 @@ pub const NOT_COMPUTED: f32 = -1.0e38;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Probe {
-    /// WGSL whose fragment entry point writes the value to location 0 as `vec4<f32>`, padded
-    /// with zeros, and [`NOT_COMPUTED`] in every channel where a pixel never computed it.
-    pub wgsl: String,
+    /// The shader in its own language. Its fragment entry point writes the value to location
+    /// 0 as four floats, padded with zeros, and [`NOT_COMPUTED`] in every channel where a
+    /// pixel never computed it.
+    pub source: String,
     /// How many channels hold the value.
     pub components: u32,
 }
 
 /// Rewrites the module so `entry_point` outputs `expr` at every pixel, with the overrides
-/// applied first. The value must be a scalar or a vector.
+/// applied first. The value must be a scalar or a vector. GLSL comes back as GLSL ES for
+/// the app's own context.
 pub fn probe(
     module: &ShaderModule,
     entry_point: &str,
     expr: ExprRef,
     overrides: &[Override],
 ) -> Result<Probe, RewriteError> {
+    if module.language() == Language::Glsl {
+        return crate::glsl::probe_glsl(module, expr, overrides);
+    }
     if overrides.is_empty() {
         return instrument(module, entry_point, expr);
     }
     let edits = patch::edits(module, overrides)?;
-    let patched =
-        ShaderModule::from_wgsl(patch::apply_edits(module.source(), &edits)).map_err(|e| {
-            RewriteError::Emit {
-                target: "patched WGSL",
-                message: e.to_string(),
-            }
-        })?;
+    let patched = patch::reparse(module, patch::apply_edits(module.source(), &edits))?;
     let moved = patch::follow(module, &patched, &edits, expr).ok_or_else(|| {
         RewriteError::Unsupported(
             "a what-if replaced this value, so the GPU can't show it over the image".to_string(),
@@ -205,7 +204,10 @@ fn instrument(
             target: "probed WGSL",
             message: e.to_string(),
         })?;
-    Ok(Probe { wgsl, components })
+    Ok(Probe {
+        source: wgsl,
+        components,
+    })
 }
 
 fn function_mut(m: &mut naga::Module, function: FunctionRef) -> Option<&mut naga::Function> {

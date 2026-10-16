@@ -237,6 +237,8 @@ fn json_scalar(json: &serde_json::Value, kind: ScalarKind) -> Option<Scalar> {
     let number = match json {
         serde_json::Value::Number(n) => n.as_f64()?,
         serde_json::Value::Bool(b) if kind == ScalarKind::Bool => return Some(Scalar::Bool(*b)),
+        // A GLSL bool uniform is held as an unsigned int.
+        serde_json::Value::Bool(b) => f64::from(u8::from(*b)),
         serde_json::Value::String(s) => match s.as_str() {
             "NaN" => f64::NAN,
             "Infinity" => f64::INFINITY,

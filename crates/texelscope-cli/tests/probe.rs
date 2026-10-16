@@ -64,8 +64,8 @@ fn probed(name: &str, pixel: [u32; 2], overrides: &[Override]) -> (Option<Value>
         .find(|s| s.expr == expr)
         .map(|s| s.value.clone());
     let probe = probe(&module, "fs", expr, overrides).unwrap_or_else(|e| panic!("{e}"));
-    let rewritten = ShaderModule::from_wgsl(probe.wgsl.as_str())
-        .unwrap_or_else(|e| panic!("{e}\n{}", probe.wgsl));
+    let rewritten = ShaderModule::from_wgsl(probe.source.as_str())
+        .unwrap_or_else(|e| panic!("{e}\n{}", probe.source));
     let gpu = Interpreter::new(Arc::new(rewritten), data(SHADER)).unwrap();
     let out = gpu.shade_pixel(pixel, &[], None).unwrap().color().unwrap();
     (value, out)

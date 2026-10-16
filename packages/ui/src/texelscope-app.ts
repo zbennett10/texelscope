@@ -690,9 +690,9 @@ export class TexelscopeApp extends LitElement {
     this.probe = { expr, name, components: 1, channel: 0, data: null, min: [], max: [], error: '' };
     const overrides = this.whatIf.map((w) => w.override);
     try {
-      const { wgsl, components } = await this.#engine.probe(expr, overrides);
+      const { source, components } = await this.#engine.probe(expr, overrides);
       const data = this.#replay && this.description
-        ? await this.#replay.probe(wgsl, this.description)
+        ? await this.#replay.probe(source, this.description)
         : 'WebGPU is not available, so values can only be shown for a region.';
       if (token !== this.#probeToken || !this.probe) return;
       if (typeof data === 'string') {
