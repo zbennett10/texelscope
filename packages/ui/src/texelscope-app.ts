@@ -16,6 +16,7 @@ import type {
   Value,
 } from './types.js';
 import { exampleCapture } from './example.js';
+import { inspectPixel } from './inspect.js';
 import { type CanvasFrame, type LiveDraw, LivePage } from './live.js';
 import { dragTo, MIN_WIDTH, paneWidths, type PaneWidths, type Side } from './panes.js';
 import { loadPanes, loadTheme, savePanes, saveTheme, type Theme } from './prefs.js';
@@ -844,11 +845,11 @@ export class TexelscopeApp extends LitElement {
     this.inspectError = '';
     const overrides = this.whatIf.map((w) => w.override);
     try {
-      const [explanation, trace, gpu] = await Promise.all([
-        this.#engine.explain(pixel[0], pixel[1], overrides),
-        this.#engine.trace(pixel[0], pixel[1], overrides),
-        this.#replay?.readPixel(pixel[0], pixel[1]) ?? Promise.resolve(null),
-      ]);
+      const [explanation, trace, gpu] = await inspectPixel(
+        () => this.#engine.explain(pixel[0], pixel[1], overrides),
+        () => this.#engine.trace(pixel[0], pixel[1], overrides),
+        () => this.#replay?.readPixel(pixel[0], pixel[1]) ?? Promise.resolve(null),
+      );
       if (token !== this.#inspectToken) return;
       this.explanation = explanation;
       this.trace = trace;
