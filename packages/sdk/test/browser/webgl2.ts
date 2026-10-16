@@ -126,6 +126,33 @@ const STATE = () => ({
   error: gl.getError(),
 });
 
+/** Polls for up to two seconds until `find` returns something. */
+async function waitFor<T>(find: () => T | undefined): Promise<T | undefined> {
+  for (let i = 0; i < 100; i++) {
+    const found = find();
+    if (found !== undefined) return found;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  return undefined;
+}
+
+type FakeUi = Window & { received: { type: string; id?: number }[]; ask(m: unknown): void };
+
+/** Sends the scene's capture to a stand-in Texelscope window, which the page then answers. */
+async function openFakeUi(s: ReturnType<typeof depthScene>) {
+  const live = keepLive(s.kept, 8);
+  markLive(s.capture, live);
+  connectTexelscope(new URL('fake-ui.html', location.href).href);
+  await openInTexelscope(s.capture, { focus: false });
+  const ui = window.open('', 'texelscope') as FakeUi;
+  const reply = (id: number) => waitFor(() => ui.received.find((m) => m.id === id) as Record<string, unknown> | undefined);
+  const sent = await waitFor(() => ui.received.find((m) => m.type === 'texelscope:capture') as { live?: unknown } | undefined);
+  return { live, ui, reply, sent };
+}
+
+/** The middle pixel of a canvas frame the page sent, whose rows run from the top. */
+const frameMiddle = (frame: { width: number; rgba: Uint8Array }) => Array.from(frame.rgba.subarray((16 * frame.width + 16) * 4, (16 * frame.width + 16) * 4 + 4));
+
 let kept: KeptDraw | undefined;
 
 const scenes = {
@@ -255,21 +282,7 @@ void main() { color = texture(u_image, v_uv); }`);
   /** The page answers the window it opened, and only that window, about a capture's draw. */
   async liveChannel() {
     const s = depthScene();
-    const live = keepLive(s.kept, 8);
-    markLive(s.capture, live);
-    connectTexelscope(new URL('fake-ui.html', location.href).href);
-    await openInTexelscope(s.capture, { focus: false });
-    const ui = window.open('', 'texelscope') as Window & { received: { type: string; id?: number }[]; ask(m: unknown): void };
-    const reply = async (id: number) => {
-      for (let i = 0; i < 100; i++) {
-        const found = ui.received.find((m) => m.id === id);
-        if (found) return found as Record<string, unknown>;
-        await new Promise((r) => setTimeout(r, 20));
-      }
-      return undefined;
-    };
-    for (let i = 0; i < 100 && !ui.received.some((m) => m.type === 'texelscope:capture'); i++) await new Promise((r) => setTimeout(r, 20));
-    const sent = ui.received.find((m) => m.type === 'texelscope:capture') as { live?: unknown } | undefined;
+    const { live, ui, reply, sent } = await openFakeUi(s);
     ui.ask({ type: 'texelscope:replay', id: 1, ...live, source: s.kept.source });
     const replayed = await reply(1);
     ui.ask({ type: 'texelscope:inputs', id: 2, ...live, pixel: [3, 3] });
@@ -302,9 +315,41 @@ void main() { color = texture(u_image, v_uv); }`);
       reloaded: reloaded?.error ?? null,
       stranger: stranger ?? null,
       scene: scene && !scene.error,
-      frame: frame && Array.from(frame.rgba.subarray((16 * frame.width + 16) * 4, (16 * frame.width + 16) * 4 + 4)),
+      frame: frame && frameMiddle(frame),
       back,
     };
+  },
+
+  /** An app that draws only when something changes, shown with one edit and then another. */
+  async idleEdits() {
+    const s = depthScene();
+    // The app draws in one frame callback and then waits for something to change.
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => {
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        gl.useProgram(s.p);
+        gl.bindVertexArray(s.mesh.vao);
+        gl.drawArrays(gl.TRIANGLES, 0, s.mesh.count);
+        resolve();
+      }),
+    );
+    const { live, ui, reply } = await openFakeUi(s);
+    const solid = (rgb: string) => s.kept.source.replace('color = vec4(u_tint.x * v_uv.x, v_id / 4.0, u_tint.z, 1.0);', `color = vec4(${rgb}, 1.0);`);
+    const shows = async (rgba: number[]) =>
+      (await waitFor(() => ui.received.some((m) => m.type === 'texelscope:frame' && frameMiddle(m as never).join() === rgba.join()) || undefined)) ?? false;
+    ui.ask({ type: 'texelscope:scene', id: 1, ...live, source: solid('0.0, 0.0, 1.0') });
+    await reply(1);
+    const blue = await shows([0, 0, 255, 255]);
+    ui.ask({ type: 'texelscope:frame-shown' });
+    ui.ask({ type: 'texelscope:scene', id: 2, ...live, source: solid('1.0, 0.0, 0.0') });
+    await reply(2);
+    const red = await shows([255, 0, 0, 255]);
+    ui.ask({ type: 'texelscope:scene', id: 3, ...live, source: null });
+    await reply(3);
+    // The app's own shader draws green as v_id / 4 for the near triangle.
+    const back = (await waitFor(() => (at(pixels(), 16, 16)[1] === 64 ? true : undefined))) ?? false;
+    ui.close();
+    return { blue, red, back };
   },
 };
 

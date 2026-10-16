@@ -84,6 +84,23 @@ describe('animation', () => {
     release();
   });
 
+  it('draws the last drawing frame again once, however often it is asked before the next frame', async () => {
+    const loop = frameLoop();
+    const { animation, useAnimation } = await load();
+    const release = useAnimation();
+    const times: number[] = [];
+    requestAnimationFrame((time) => {
+      times.push(time);
+      animation.drew();
+    });
+    loop.render(16);
+    expect(animation.redraw()).toBe(true);
+    expect(animation.redraw()).toBe(true);
+    loop.render(32);
+    expect(times).toEqual([16, 16]);
+    release();
+  });
+
   it('has nothing to draw again until a frame draws', async () => {
     const loop = frameLoop();
     const { animation, useAnimation } = await load();

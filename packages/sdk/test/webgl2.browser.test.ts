@@ -75,6 +75,13 @@ describe.skipIf(!chromePath)('the WebGL2 hook in Chrome', () => {
     expect(r.back[2]).not.toBe(255);
   });
 
+  it('shows each new edit, and then its own shader, in an app that draws only when something changes', async () => {
+    const { blue, red, back } = await scene<{ blue: boolean; red: boolean; back: boolean }>('idleEdits');
+    expect(blue).toBe(true);
+    expect(red).toBe(true);
+    expect(back).toBe(true);
+  });
+
   it('records inputs around another pixel later, from the vertex arrays the draw had', async () => {
     const { uv, id } = await scene<{ uv: number[]; id: number[] }>('movedWindow');
     expect(uv[0]).toBeCloseTo(28.5 / 32, 5);

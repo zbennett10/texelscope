@@ -2,6 +2,7 @@
 // shader or a probe, records the draw's inputs around another pixel, or runs an edit in the
 // app's own frames and sends the canvas back after each.
 
+import { animation } from '../animation.js';
 import { answerTexelscope, isTexelscopeOpen, tellTexelscope } from '../send.js';
 import { windowAround } from './capture.js';
 import { windowInputs } from './inputs.js';
@@ -78,7 +79,10 @@ function answer(request: { type: string }, reply: (message: unknown, transfer?: 
     if (showing && showing.draw !== draw) stopScene();
     const failed = runEdit(draw.gl, draw.program, draw.vertex, r.source);
     if (failed) return reply({ type: done, id: r.id, error: failed });
-    if (!showing) {
+    if (showing) {
+      // An app that draws only when something changes draws its last frame with the new edit.
+      animation.redraw();
+    } else {
       const stopStream = streamCanvas(draw.gl, (frame) => {
         if (!tellTexelscope({ type: 'texelscope:frame', page, draw: draw.id, ...frame }, [frame.rgba.buffer])) stopScene();
       });
@@ -101,8 +105,12 @@ function answer(request: { type: string }, reply: (message: unknown, transfer?: 
 /** Stops sending frames and puts back every program an edit replaced. */
 function stopScene() {
   const was = showing;
+  const edited = editsRun();
   showing = undefined;
   was?.stop();
   if (was) restoreProgram(was.draw.program);
   if (editsRun()) for (const d of draws.values()) restoreProgram(d.program);
+  // An app that draws only when something changes draws its last frame again with its own
+  // shader, once any frame running now has ended.
+  if (edited) setTimeout(() => animation.redraw(), 0);
 }
