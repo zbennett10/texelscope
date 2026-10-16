@@ -33,6 +33,7 @@ The UI runs on port 5173. Press Example to load a sample capture, or open your o
 - Scroll to zoom, drag to pan and double-click to fit.
 - Press the left and right arrows to step through frames.
 - Drag the edge of a side pane to resize it, or double-click the edge to reset it.
+- For a WebGL2 capture from your app, the buttons over the image switch between Frame, Draw and Live.
 - The button at the right end of the header switches between the dark and light themes.
 
 ## Debugging your app
@@ -58,6 +59,18 @@ Run `npm run build`, open `chrome://extensions`, turn on developer mode and load
 ### What Alt-click captures
 
 In WebGL2, Alt-click captures every draw in the next frame that changed the pixel, and each one arrives as a frame. In WebGPU it captures the next draw, which may belong to a different pass than the one behind the pixel. The SDK's `filter` option picks the pass. If the app only draws when something changes, Texelscope asks it to draw its last frame again, and if that fails, a note on the page asks you to move the view a little.
+
+### Editing a WebGL2 draw
+
+Texelscope opens in a window beside your app, and the page that sent a WebGL2 capture keeps what the draw used. When you edit the shader, pin a value or flip a decision, your app draws it again on its own GPU and Texelscope shows the result.
+
+- Frame shows the frame your app drew when you picked the pixel.
+- Draw shows this draw by itself, drawn again with your edits and what-ifs.
+- Live runs your edits in every draw that uses the shader, so the whole app shows them. Your app's own shader comes back when you leave Live or close Texelscope.
+
+Map works the same way, and clicking outside the window of recorded inputs records them around the new pixel. The draw keeps the uniforms and render targets it had when you picked the pixel, so it matches the explanation while your app animates. In the explanation, and whenever your app draws an edit, loops stop after 16384 turns in all, so a flip that keeps a loop going can't hang the GPU.
+
+To try it on a small scene, run `npm run build`, then `npx vite examples/webgl2-scene`, open the page and Alt-click a box.
 
 ### From code
 
@@ -130,7 +143,7 @@ npm run build
 | `packages/ui` | The web UI, built from Lit web components |
 | `packages/vite-plugin` | A Vite plugin that adds the hooks to an app while it is in development |
 | `packages/extension` | A Chrome extension that adds the hooks to any page |
-| `examples` | Synthetic shaders and captures |
+| `examples` | Synthetic shaders, captures and a WebGL2 scene |
 | `docs` | The capture format |
 
 ## Not yet
