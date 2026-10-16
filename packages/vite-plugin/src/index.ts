@@ -72,7 +72,14 @@ export default function texelscope(options: TexelscopeOptions = {}): Plugin {
           return;
         }
         res.setHeader('Content-Type', TYPES[extname(file)] ?? 'application/octet-stream');
-        createReadStream(file).pipe(res);
+        // A file can go away before it is read, as when the UI is built again, and an unhandled
+        // stream error would stop the app's dev server.
+        const stream = createReadStream(file);
+        stream.on('error', () => {
+          if (!res.headersSent) res.statusCode = 404;
+          res.end();
+        });
+        stream.pipe(res);
       });
     },
   };
