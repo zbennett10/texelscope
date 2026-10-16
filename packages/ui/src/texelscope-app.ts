@@ -2,7 +2,7 @@ import { LitElement, css, html, nothing } from 'lit';
 import type { Capture } from '@texelscope/sdk';
 import { Engine } from './engine/client.js';
 import { formatValue, lineAt, lineStarts, ramp } from './format.js';
-import { Replay } from './gpu/replay.js';
+import { MISSING, Replay } from './gpu/replay.js';
 import type {
   Comparison,
   Description,
@@ -16,12 +16,13 @@ import type {
   Value,
 } from './types.js';
 import { exampleCapture } from './example.js';
+import { type CanvasFrame, type LiveDraw, LivePage } from './live.js';
 import { dragTo, MIN_WIDTH, paneWidths, type PaneWidths, type Side } from './panes.js';
 import { loadPanes, loadTheme, savePanes, saveTheme, type Theme } from './prefs.js';
 import { themeTokens } from './theme.js';
 import type { InlineValue } from './views/source-view.js';
 import { branchImage, layerImage } from './views/region-view.js';
-import type { Overlay, ProbeView } from './views/render-view.js';
+import type { Overlay, ProbeView, ViewChoice } from './views/render-view.js';
 import './views/inspector.js';
 import './views/region-view.js';
 import './views/render-view.js';
@@ -31,7 +32,30 @@ interface Frame {
   capture: Capture;
   json: string;
   received: Date;
+  /** The page that can draw a WebGL capture again, while it stays open. */
+  live?: { draw: LiveDraw; page: LivePage };
 }
+
+/** What the image of a WebGL capture shows: the app's frame, the draw again, or the app live. */
+type View = 'frame' | 'draw' | 'live';
+
+const VIEWS: ViewChoice[] = [
+  { id: 'frame', label: 'Frame', title: 'The frame your app drew when you picked the pixel' },
+  { id: 'draw', label: 'Draw', title: 'This draw by itself, drawn again by your app with your edits and what-ifs' },
+  { id: 'live', label: 'Live', title: 'Your app running your edits in every draw that uses this shader, from its canvas' },
+];
+
+const GPU_NOTES: Record<View, string> = {
+  frame: 'GPU is the frame your app drew.',
+  draw: 'GPU is your app drawing this draw again with your edits and what-ifs.',
+  live: "GPU is your app's canvas running your edits, after every pass, so it isn't this draw's color alone.",
+};
+
+/** The source a capture brought, before any edit. */
+const capturedSource = (frame: Frame | undefined) => {
+  const source = frame?.capture.shader.source;
+  return source && 'inline' in source ? source.inline : '';
+};
 
 const other = (side: Side): Side => (side === 'left' ? 'right' : 'left');
 
@@ -76,6 +100,8 @@ export class TexelscopeApp extends LitElement {
     shown: { state: true },
     probe: { state: true },
     gpuError: { state: true },
+    view: { state: true },
+    liveSize: { state: true },
     dragging: { state: true },
     theme: { type: String, reflect: true },
   };
@@ -305,6 +331,10 @@ export class TexelscopeApp extends LitElement {
   #probeToken = 0;
   #probeImage?: { data: Float32Array; channel: number; image: ImageData };
   declare gpuError: string;
+  /** What the image of a WebGL capture its page can draw again shows. */
+  declare view: View;
+  /** The size of the app's canvas in the Live view, when it changed since the capture. */
+  declare liveSize: { width: number; height: number } | null;
   declare dragging: boolean;
   declare theme: Theme;
 
@@ -320,6 +350,11 @@ export class TexelscopeApp extends LitElement {
   #valid = '';
   #inspectToken = 0;
   #regionToken = 0;
+  #gpuToken = 0;
+  /** The pages captures came from, by their windows. */
+  #pages = new Map<Window, LivePage>();
+  /** The draw whose app runs an edit for the Live view. */
+  #running?: { draw: LiveDraw; page: LivePage };
 
   constructor() {
     super();
@@ -346,6 +381,8 @@ export class TexelscopeApp extends LitElement {
     this.shown = '';
     this.probe = null;
     this.gpuError = '';
+    this.view = 'draw';
+    this.liveSize = null;
     this.dragging = false;
     this.theme = loadTheme();
     this.#replayReady = Replay.create().then(
@@ -361,7 +398,7 @@ export class TexelscopeApp extends LitElement {
   override connectedCallback() {
     super.connectedCallback();
     window.addEventListener('message', this.#onMessage);
-    // Tell the page that opened this tab that captures can come now.
+    // Tell the page that opened this window that captures can come now.
     window.opener?.postMessage({ type: 'texelscope:ready' }, '*');
     this.addEventListener('dragover', (e) => {
       e.preventDefault();
@@ -370,12 +407,15 @@ export class TexelscopeApp extends LitElement {
     this.addEventListener('dragleave', () => (this.dragging = false));
     this.addEventListener('drop', (e) => this.#drop(e));
     window.addEventListener('keydown', this.#onKey);
+    window.addEventListener('pagehide', this.#stopLive);
     this.#layout.observe(this);
   }
 
   override disconnectedCallback() {
     window.removeEventListener('message', this.#onMessage);
     window.removeEventListener('keydown', this.#onKey);
+    window.removeEventListener('pagehide', this.#stopLive);
+    this.#stopLive();
     this.#layout.disconnect();
     super.disconnectedCallback();
   }
@@ -390,7 +430,9 @@ export class TexelscopeApp extends LitElement {
 
   override render() {
     const frame = this.frames[this.current];
-    const target = frame?.capture.target;
+    // A canvas resized since the capture has other pixels, so the capture's marks don't show.
+    const live = frame?.live && this.view === 'live' ? this.liveSize : null;
+    const target = live ? { ...frame!.capture.target, ...live } : frame?.capture.target;
     return html`
       <header>
         <div class="brand">${LOGO}<h1>Texelscope</h1></div>
@@ -424,12 +466,15 @@ export class TexelscopeApp extends LitElement {
       <texelscope-render-view
         .targetWidth=${target?.width ?? 0}
         .targetHeight=${target?.height ?? 0}
-        .selected=${this.pixel}
-        .compared=${this.comparePixel}
-        .inputsWindow=${frame?.capture.inputs?.kind === 'window' ? frame.capture.inputs.rect : null}
+        .selected=${live ? null : this.pixel}
+        .compared=${live ? null : this.comparePixel}
+        .inputsWindow=${!live && frame?.capture.inputs?.kind === 'window' ? frame.capture.inputs.rect : null}
         .region=${this.regionRect}
         .overlay=${this.#overlay()}
         .probe=${this.probe}
+        .views=${frame?.live ? VIEWS : []}
+        .view=${this.view}
+        @view=${(e: CustomEvent<View>) => this.#setView(e.detail)}
         @probe-channel=${(e: CustomEvent<number>) => this.probe && (this.probe = { ...this.probe, channel: e.detail })}
         @probe-hide=${() => this.#hideProbe()}
         .message=${frame ? this.gpuError : 'No capture yet.\nUse Example to try one, or send one from your app.'}
@@ -460,6 +505,8 @@ export class TexelscopeApp extends LitElement {
         @probe=${(e: CustomEvent<{ expr: ExprRef; name: string }>) => this.#showProbe(e.detail.expr, e.detail.name)}
         .trace=${this.trace}
         .gpuColor=${this.gpuColor}
+        .gpuNote=${frame?.capture.shader.language === 'glsl' ? GPU_NOTES[frame.live ? this.view : 'frame'] : 'GPU is Texelscope replaying the draw on your GPU.'}
+        .parity=${!(frame?.live && this.view === 'live')}
         .format=${target?.format ?? 'rgba8unorm'}
         .whatIf=${this.whatIf.map((w) => w.label)}
         .source=${this.#valid}
@@ -562,13 +609,31 @@ export class TexelscopeApp extends LitElement {
   }
 
   #onMessage = (event: MessageEvent) => {
-    const data = event.data as { type?: string; capture?: Capture; pixel?: [number, number] } | undefined;
-    // An app that reloaded finds this tab again and asks whether it is listening.
+    const data = event.data as { type?: string; capture?: Capture; pixel?: [number, number]; live?: LiveDraw } | undefined;
+    const from = event.source as Window | null;
+    // An app that reloaded finds this window again and asks whether it is listening.
     if (data?.type === 'texelscope:hello') {
-      (event.source as Window | null)?.postMessage({ type: 'texelscope:ready' }, event.origin);
+      from?.postMessage({ type: 'texelscope:ready' }, event.origin);
     }
-    if (data?.type === 'texelscope:capture' && data.capture) this.#receive(data.capture, data.pixel);
+    if (data?.type === 'texelscope:capture' && data.capture) {
+      const live = data.live && from ? { draw: data.live, page: this.#pageOf(from, event.origin) } : undefined;
+      this.#receive(data.capture, data.pixel, live);
+      return;
+    }
+    // Replies and frames come only from a page that sent a capture.
+    const page = from && this.#pages.get(from);
+    if (!page || page.origin !== event.origin) return;
+    if (data?.type === 'texelscope:frame') this.#showFrame(data as unknown as CanvasFrame, page);
+    else page.receive(data);
   };
+
+  #pageOf(window: Window, origin: string): LivePage {
+    const known = this.#pages.get(window);
+    if (known && known.origin === origin) return known;
+    const page = new LivePage(window, origin);
+    this.#pages.set(window, page);
+    return page;
+  }
 
   async #pickFile(e: Event) {
     const file = (e.target as HTMLInputElement).files?.[0];
@@ -588,8 +653,8 @@ export class TexelscopeApp extends LitElement {
   }
 
   /** Adds a capture to the frame list and opens it. */
-  #receive(capture: Capture, pixel?: [number, number]) {
-    const frame: Frame = { capture, json: JSON.stringify(capture), received: new Date() };
+  #receive(capture: Capture, pixel?: [number, number], live?: Frame['live']) {
+    const frame: Frame = { capture, json: JSON.stringify(capture), received: new Date(), live };
     this.frames = [...this.frames, frame].slice(-24);
     this.#select(this.frames.length - 1, pixel);
   }
@@ -640,14 +705,8 @@ export class TexelscopeApp extends LitElement {
   async #renderGpu() {
     if (!this.#replay || !this.description) return;
     const overrides = this.whatIf.map((w) => w.override);
-    // A WebGL capture shows the frame the app drew, which what-ifs can't change.
-    if (this.frames[this.current]?.capture.shader.language === 'glsl') {
-      await this.#replay.render(this.#valid, this.description);
-      this.gpuError = overrides.length > 0
-        ? "This is your app's frame. What-ifs show in the explanation, since WebGL captures can't be replayed on the GPU yet."
-        : '';
-      return;
-    }
+    const frame = this.frames[this.current];
+    if (frame?.capture.shader.language === 'glsl') return this.#renderGlsl(frame, this.#replay);
     let source = this.#valid;
     if (overrides.length > 0) {
       try {
@@ -660,7 +719,125 @@ export class TexelscopeApp extends LitElement {
     this.gpuError = error ? `The GPU replay failed:\n${error}` : '';
   }
 
+  /**
+   * Shows a WebGL capture: the frame the app drew, or the draw its page drew again with the
+   * edits and what-ifs, or its canvas while the app runs them.
+   */
+  async #renderGlsl(frame: Frame, replay: Replay) {
+    const token = ++this.#gpuToken;
+    const overrides = this.whatIf.map((w) => w.override);
+    const changed = overrides.length > 0 || this.#valid !== capturedSource(frame);
+    const live = frame.live;
+    const view = live ? this.view : 'frame';
+    if (view !== 'live' || this.#running?.draw !== live?.draw) this.#stopLive();
+    if (view !== 'live') this.liveSize = null;
+    if (view === 'frame' || !live) {
+      replay.showReference();
+      this.gpuError = !changed
+        ? ''
+        : live
+          ? 'This is the frame your app drew, so your changes show in the explanation. Pick Draw or Live to see them on the GPU.'
+          : "This is your app's frame, so your changes show in the explanation. Only the app's page can draw a WebGL capture again, so Alt-click the pixel in your app to see them on the GPU.";
+      return;
+    }
+    let source = this.#valid;
+    if (changed) {
+      try {
+        source = await this.#engine.patched(overrides);
+      } catch (error) {
+        if (token === this.#gpuToken) this.gpuError = `The GPU can't show these changes: ${(error as Error).message}`;
+        return;
+      }
+    }
+    if (view === 'live') {
+      this.#running = live;
+      const failed = await live.page.scene(live.draw, source);
+      if (token === this.#gpuToken) this.gpuError = failed ? `Your app couldn't run the edited shader:\n${failed}` : '';
+      return;
+    }
+    const result = await live.page.replay(live.draw, source, 'color');
+    if (result === null || token !== this.#gpuToken) return;
+    if (typeof result === 'string') {
+      this.gpuError = `Your app couldn't draw this again:\n${result}`;
+      return;
+    }
+    replay.showImage(result.width, result.height, result.data);
+    this.gpuError = '';
+  }
+
+  /** Shows a frame of the app's canvas while the Live view runs an edit. */
+  #showFrame(data: CanvasFrame, page: LivePage) {
+    const live = this.frames[this.current]?.live;
+    const running = this.#running;
+    if (running && live === running && running.page === page && this.view === 'live' && data.draw === live.draw.draw && data.page === live.draw.page) {
+      // A canvas the app resized since the capture shows at its new size.
+      const target = this.frames[this.current]!.capture.target;
+      const resized = data.width !== target.width || data.height !== target.height;
+      const size = resized ? { width: data.width, height: data.height } : null;
+      if (size?.width !== this.liveSize?.width || size?.height !== this.liveSize?.height) {
+        this.liveSize = size;
+        void this.updateComplete.then(() => this.#replay?.present());
+      }
+      const shown = this.#replay?.showImage(data.width, data.height, data.rgba);
+      const pixel = this.pixel;
+      if (pixel && shown) void this.#replay?.readPixel(pixel[0], pixel[1]).then((c) => (this.gpuColor = c.length ? c : null));
+    }
+    page.frameShown();
+  }
+
+  /** Puts the app's own shader back if it runs an edit for the Live view. */
+  #stopLive = () => {
+    const running = this.#running;
+    this.#running = undefined;
+    if (running) void running.page.scene(running.draw, null);
+  };
+
+  #setView(view: View) {
+    if (view === this.view) return;
+    this.view = view;
+    void this.#refresh(this.pixel ?? undefined);
+  }
+
+  /**
+   * Has the page record the draw's inputs around a pixel outside the window the capture
+   * recorded, then loads the capture again with them. Returns why it couldn't.
+   */
+  async #recordInputs(frame: Frame & { live: NonNullable<Frame['live']> }, pixel: [number, number]): Promise<string | undefined> {
+    const inputs = await frame.live.page.inputs(frame.live.draw, pixel);
+    if (typeof inputs === 'string') return inputs;
+    const capture = { ...frame.capture, inputs };
+    const moved: Frame = { ...frame, capture, json: JSON.stringify(capture) };
+    const edited = this.#valid;
+    try {
+      this.description = await this.#engine.load(moved.json);
+      // An edit stays, since the source alone changes nothing the overrides point at.
+      if (edited !== capturedSource(frame)) this.description = await this.#engine.setSource(edited);
+    } catch (error) {
+      return (error as Error).message;
+    }
+    this.frames = this.frames.map((f) => (f === frame ? moved : f));
+    return undefined;
+  }
+
+  /** Whether a WebGL capture's inputs reach every pixel of a rectangle. */
+  #inputsCover(frame: Frame, rect: Rect): boolean {
+    const inputs = frame.capture.inputs;
+    if (inputs?.kind !== 'window') return true;
+    const w = inputs.rect;
+    return rect.x >= w.x && rect.y >= w.y && rect.x + rect.width <= w.x + w.width && rect.y + rect.height <= w.y + w.height;
+  }
+
   async #pick(pixel: [number, number]) {
+    const frame = this.frames[this.current];
+    if (frame?.live && !this.#inputsCover(frame, { x: pixel[0], y: pixel[1], width: 1, height: 1 })) {
+      this.pixel = pixel;
+      this.inspectError = '';
+      const failed = await this.#recordInputs(frame as Frame & { live: NonNullable<Frame['live']> }, pixel);
+      if (failed) {
+        this.inspectError = `The inputs around this pixel couldn't be recorded: ${failed}`;
+        return;
+      }
+    }
     const token = ++this.#inspectToken;
     this.pixel = pixel;
     // The last explanation stays up until the new one arrives, so the inspector keeps its scroll.
@@ -691,10 +868,8 @@ export class TexelscopeApp extends LitElement {
     const overrides = this.whatIf.map((w) => w.override);
     try {
       const { source, components } = await this.#engine.probe(expr, overrides);
-      const data = this.#replay && this.description
-        ? await this.#replay.probe(source, this.description)
-        : 'WebGPU is not available, so values can only be shown for a region.';
-      if (token !== this.#probeToken || !this.probe) return;
+      const data = await this.#probeData(source);
+      if (data === null || token !== this.#probeToken || !this.probe) return;
       if (typeof data === 'string') {
         this.probe = { ...this.probe, error: data };
         return;
@@ -704,6 +879,25 @@ export class TexelscopeApp extends LitElement {
     } catch (error) {
       if (token === this.#probeToken && this.probe) this.probe = { ...this.probe, error: (error as Error).message };
     }
+  }
+
+  /** A probed shader's value at every pixel, from Texelscope's GPU or from a WebGL capture's page. */
+  async #probeData(source: string): Promise<Float32Array | string | null> {
+    const frame = this.frames[this.current];
+    if (frame?.capture.shader.language !== 'glsl') {
+      return this.#replay && this.description
+        ? this.#replay.probe(source, this.description)
+        : 'WebGPU is not available, so values can only be shown for a region.';
+    }
+    if (!frame.live) {
+      return "Showing a value over the whole image needs your app's page, since only it can draw a WebGL capture again. Shift-drag a region to see it there.";
+    }
+    const result = await frame.live.page.replay(frame.live.draw, source, 'probe');
+    if (result === null || typeof result === 'string') return result;
+    const data = result.data;
+    // A pixel that never computed the value holds the mark, and one the draw missed holds NaN.
+    for (let i = 0; i < data.length; i++) if (data[i]! <= MISSING / 2) data[i] = Number.NaN;
+    return data;
   }
 
   #hideProbe() {
@@ -751,6 +945,18 @@ export class TexelscopeApp extends LitElement {
     this.regionRect = rect;
     this.regionBusy = true;
     this.regionError = '';
+    const frame = this.frames[this.current];
+    const window = frame?.capture.inputs?.kind === 'window' ? frame.capture.inputs.rect : null;
+    // A region that fits in a window of inputs gets one recorded around its middle.
+    if (frame?.live && window && !this.#inputsCover(frame, rect) && rect.width <= window.width && rect.height <= window.height) {
+      const middle: [number, number] = [rect.x + Math.floor(rect.width / 2), rect.y + Math.floor(rect.height / 2)];
+      const failed = await this.#recordInputs(frame as Frame & { live: NonNullable<Frame['live']> }, middle);
+      if (failed && token === this.#regionToken) {
+        this.regionBusy = false;
+        this.regionError = `The inputs for this region couldn't be recorded: ${failed}`;
+        return;
+      }
+    }
     try {
       const region = await this.#engine.region(rect, this.whatIf.map((w) => w.override), null);
       if (token !== this.#regionToken) return;

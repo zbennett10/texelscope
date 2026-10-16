@@ -25,6 +25,8 @@ export class TexelscopeInspector extends LitElement {
     comparison: { attribute: false },
     trace: { attribute: false },
     gpuColor: { attribute: false },
+    gpuNote: { type: String },
+    parity: { type: Boolean },
     format: { type: String },
     whatIf: { attribute: false },
     source: { type: String },
@@ -371,6 +373,10 @@ export class TexelscopeInspector extends LitElement {
   declare comparison: Comparison | null;
   declare trace: Trace | null;
   declare gpuColor: number[] | null;
+  /** What the GPU color is, in a sentence. */
+  declare gpuNote: string;
+  /** Whether the GPU color is this draw's own, so it should match the CPU's. */
+  declare parity: boolean;
   declare format: string;
   /** Labels of the overrides in effect. */
   declare whatIf: string[];
@@ -395,6 +401,8 @@ export class TexelscopeInspector extends LitElement {
     this.comparison = null;
     this.trace = null;
     this.gpuColor = null;
+    this.gpuNote = 'GPU is what your app drew.';
+    this.parity = true;
     this.format = 'rgba8unorm';
     this.whatIf = [];
     this.source = '';
@@ -436,8 +444,8 @@ export class TexelscopeInspector extends LitElement {
   #colors(e: Explanation) {
     const cpu = e.discarded ? null : numbers(e.color);
     const gpu = this.gpuColor;
-    let parity = html`<span class="badge">no GPU</span>`;
-    if (gpu && cpu) {
+    let parity = this.parity ? html`<span class="badge">no GPU</span>` : nothing;
+    if (gpu && cpu && this.parity) {
       // Compare with the CPU color as the target format would store it.
       const stored = quantize(this.format, cpu);
       const worst = Math.max(...stored.map((c, i) => Math.abs(c - (gpu[i] ?? 0))));
@@ -446,17 +454,17 @@ export class TexelscopeInspector extends LitElement {
         ? html`<span class="badge ok">GPU and CPU agree</span>`
         : html`<span class="badge warn">differ by ${fixed(worst)}</span>`;
     }
-    const row = (label: string, rgba: number[] | null) => html`
+    const row = (label: string, rgba: number[] | null, missing: string) => html`
       <div class="swatch" style="--c: ${rgba ? colorCss(rgba) : 'transparent'}"></div>
-      <div class="mono">${label} ${rgba ? rgba.map((c) => fixed(c, 3)).join(', ') : 'discarded'}</div>
+      <div class="mono">${label} ${rgba ? rgba.map((c) => fixed(c, 3)).join(', ') : missing}</div>
     `;
     return html`<section>
       <h2>Pixel ${e.pixel[0]}, ${e.pixel[1]} ${parity}</h2>
-      <div class="colors">${row('GPU', gpu)} ${row('CPU', cpu)}</div>
+      <div class="colors">${row('GPU', gpu, 'not drawn here')} ${row('CPU', cpu, 'discarded')}</div>
       ${this.#why(e)}
       <p class="intro" style="margin-top: 6px">
-        GPU is what your app drew. CPU is Texelscope running the shader itself, which the rest of this panel
-        explains. Code this pixel didn't run is dimmed in the source.
+        ${this.gpuNote} CPU is Texelscope running the shader itself, which the rest of this panel explains. Code
+        this pixel didn't run is dimmed in the source.
       </p>
       ${e.notes.map((n) => html`<div class="dim">${n}</div>`)}
     </section>`;

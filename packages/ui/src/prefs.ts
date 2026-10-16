@@ -30,7 +30,7 @@ export function savePanes(widths: Partial<PaneWidths>): void {
   write(PANES_KEY, text === '{}' ? undefined : text);
 }
 
-// Storage can be missing or blocked, in which case settings last until the tab closes.
+// Storage can be missing or blocked, in which case settings last until the window closes.
 function read(key: string): string | undefined {
   try {
     return localStorage.getItem(key) ?? undefined;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Capture } from '@texelscope/sdk';
-import { decodeTexel, quantize, vertexStage } from '../src/gpu/replay.js';
+import { decodeTexel, quantize, shownPixel, toBytes, vertexStage } from '../src/gpu/replay.js';
 import type { Description } from '../src/types.js';
 
 const capture = {
@@ -45,5 +45,22 @@ describe('texels read back from the GPU', () => {
   it('compare with CPU colors rounded the way the target stores them', () => {
     expect(quantize('rgba8unorm', [0.5, 1.2, -1, 0.1])).toEqual([128 / 255, 1, 0, 26 / 255]);
     expect(quantize('rgba32float', [0.1])).toEqual([0.1]);
+  });
+});
+
+describe('images the app drew again', () => {
+  it('show clear where the draw never reached and clamp what it wrote', () => {
+    const data = new Float32Array([NaN, NaN, NaN, NaN, 0.5, 1.5, -1, 1]);
+    expect(Array.from(toBytes(data))).toEqual([0, 0, 0, 0, 128, 255, 0, 255]);
+  });
+
+  it('read back as the target stores them, and not at all where nothing drew', () => {
+    const shown = { width: 2, data: new Float32Array([NaN, NaN, NaN, NaN, 0.5, 1.5, -1, 1]) };
+    expect(shownPixel(shown, 0, 0, 'rgba8unorm')).toEqual([]);
+    expect(shownPixel(shown, 1, 0, 'rgba8unorm')).toEqual([128 / 255, 1, 0, 1]);
+    expect(shownPixel({ width: 1, data: new Uint8Array([255, 0, 51, 255]) }, 0, 0, 'rgba8unorm')).toEqual([1, 0, 0.2, 1]);
+    // A canvas that shrank in the Live view no longer has the picked pixel.
+    expect(shownPixel(shown, 2, 0, 'rgba8unorm')).toEqual([]);
+    expect(shownPixel(shown, 0, 1, 'rgba8unorm')).toEqual([]);
   });
 });

@@ -18,6 +18,13 @@ export interface ProbeView {
 
 const RAMP_CSS = `linear-gradient(90deg, ${[0, 0.25, 0.5, 0.75, 1].map((t) => colorCss([...ramp(t), 1])).join(', ')})`;
 
+/** One way to show the image, picked with the buttons over it. */
+export interface ViewChoice {
+  id: string;
+  label: string;
+  title: string;
+}
+
 /** A layer image drawn over part of the render. */
 export interface Overlay {
   rect: Rect;
@@ -39,6 +46,8 @@ export class TexelscopeRenderView extends LitElement {
     overlay: { attribute: false },
     probe: { attribute: false },
     message: { type: String },
+    views: { attribute: false },
+    view: { type: String },
   };
 
   static override styles = css`
@@ -143,6 +152,43 @@ export class TexelscopeRenderView extends LitElement {
       margin-left: auto;
       font-family: var(--ts-sans);
     }
+    .views {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      z-index: 2;
+      display: flex;
+      padding: 2px;
+      border: 1px solid var(--ts-glass-border);
+      border-radius: 8px;
+      background: var(--ts-glass);
+      backdrop-filter: blur(10px);
+      box-shadow: var(--ts-shadow);
+    }
+    .views button {
+      padding: 3px 10px;
+      border: 0;
+      border-radius: 6px;
+      background: none;
+      color: var(--ts-text-2);
+      font: 500 12px var(--ts-sans);
+      cursor: pointer;
+    }
+    .views button:hover {
+      color: var(--ts-text);
+    }
+    .views button.on {
+      background: var(--ts-raised);
+      color: var(--ts-text);
+      box-shadow: 0 0 0 1px var(--ts-border-strong);
+    }
+    .views button:focus-visible {
+      outline: 2px solid var(--ts-focus);
+      outline-offset: 1px;
+    }
+    :host([choosing]) .legend {
+      top: 48px;
+    }
     .hud.hint {
       left: 10px;
       color: var(--ts-text-2);
@@ -164,6 +210,9 @@ export class TexelscopeRenderView extends LitElement {
   /** A value shown over the whole image, with its legend. */
   declare probe: ProbeView | null;
   declare message: string;
+  /** Ways to show the image, when there is more than one. */
+  declare views: ViewChoice[];
+  declare view: string;
 
   #scale = 1;
   #ox = 0;
@@ -188,6 +237,8 @@ export class TexelscopeRenderView extends LitElement {
     this.overlay = null;
     this.probe = null;
     this.message = '';
+    this.views = [];
+    this.view = '';
   }
 
   /** What the shown value is at a pixel, for the readout. */
@@ -252,7 +303,16 @@ export class TexelscopeRenderView extends LitElement {
       ${this.message ? html`<div class="message">${this.message}</div>` : ''}
       ${hud ? html`<div class="hud ${this.#hover ? '' : 'hint'}">${hud}</div>` : ''}
       ${this.#legend()}
+      ${this.#choices()}
     `;
+  }
+
+  #choices() {
+    if (this.views.length < 2) return nothing;
+    return html`<div class="views" role="group" aria-label="What the image shows" @pointerdown=${(e: Event) => e.stopPropagation()}>
+      ${this.views.map((v) => html`<button class=${v.id === this.view ? 'on' : ''} title=${v.title} aria-pressed=${v.id === this.view}
+        @click=${() => this.dispatchEvent(new CustomEvent('view', { detail: v.id }))}>${v.label}</button>`)}
+    </div>`;
   }
 
   override firstUpdated() {
@@ -268,6 +328,7 @@ export class TexelscopeRenderView extends LitElement {
   }
 
   override updated(changed: Map<string, unknown>) {
+    if (changed.has('views')) this.toggleAttribute('choosing', this.views.length > 1);
     if (changed.has('targetWidth') || changed.has('targetHeight')) {
       this.#fitted = false;
       const gpu = this.canvas;

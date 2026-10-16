@@ -18,7 +18,7 @@ const TEXEL_BYTES: Record<string, number> = {
 const UNFILTERABLE = new Set(['r32float', 'rg32float', 'rgba32float']);
 
 /** What a probe writes, and its target starts at, where a pixel computes nothing. */
-const MISSING = -1e38;
+export const MISSING = -1e38;
 
 const BLIT = /* wgsl */ `
 @group(0) @binding(0) var image: texture_2d<f32>;
@@ -42,6 +42,8 @@ export class Replay {
   #context?: GPUCanvasContext;
   #format: GPUTextureFormat;
   #blit?: GPURenderPipeline;
+  /** An image the app's page drew, shown in place of the target's own pixels. */
+  #shown?: { width: number; height: number; data: Float32Array | Uint8Array };
 
   static async create(): Promise<Replay> {
     if (!navigator.gpu) throw new Error('this browser has no WebGPU, so only the interpreter runs');
@@ -63,6 +65,7 @@ export class Replay {
 
   /** Creates the target and every bound resource. */
   async load(capture: Capture, engine: Engine) {
+    this.#shown = undefined;
     for (const resource of this.#resources.values()) {
       if (!(resource instanceof GPUSampler)) resource.destroy();
     }
@@ -230,6 +233,49 @@ export class Replay {
     pass.end();
   }
 
+  /**
+   * Shows an image the app's page drew, in place of the target: floats from a draw it drew
+   * again, NaN where the draw didn't reach, or a frame of its canvas as RGBA bytes, which may
+   * have changed size since the capture. Returns false when no WebGL capture is loaded.
+   */
+  showImage(width: number, height: number, data: Float32Array | Uint8Array): boolean {
+    const target = this.#target;
+    if (!target || target.format !== 'rgba8unorm') return false;
+    this.#resize(width, height);
+    const bytes = data instanceof Uint8Array ? data : toBytes(data);
+    this.device.queue.writeTexture({ texture: this.#target! }, bytes, { bytesPerRow: width * 4 }, [width, height]);
+    this.#shown = { width, height, data };
+    this.present();
+    return true;
+  }
+
+  /** Makes the target another size, for a WebGL capture, whose target only shows images. */
+  #resize(width: number, height: number) {
+    const target = this.#target;
+    if (!target || (target.width === width && target.height === height)) return;
+    target.destroy();
+    this.#target = this.device.createTexture({
+      label: 'texelscope target',
+      size: [width, height],
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+  }
+
+  /** Shows the frame the app drew again, after an image from its page. */
+  showReference() {
+    const capture = this.#capture;
+    const reference = capture?.reference;
+    if (!capture || !reference || !this.#target) return;
+    if (this.#shown) {
+      this.#resize(capture.target.width, capture.target.height);
+      const { x, y, width, height } = reference.rect;
+      this.device.queue.writeTexture({ texture: this.#target, origin: { x, y } }, fromBase64(reference.rgba8), { bytesPerRow: width * 4 }, [width, height]);
+      this.#shown = undefined;
+    }
+    this.present();
+  }
+
   /** Copies the last render to the attached canvas. */
   present() {
     const target = this.#target;
@@ -258,6 +304,8 @@ export class Replay {
 
   /** The color the GPU wrote at one pixel, as floats. */
   async readPixel(x: number, y: number): Promise<number[]> {
+    const shown = this.#shown;
+    if (shown) return shownPixel(shown, x, y, this.#capture?.target.format ?? 'rgba8unorm');
     const target = this.#target;
     const capture = this.#capture;
     const format = capture?.reference ? 'rgba8unorm' : capture?.target.format;
@@ -391,6 +439,25 @@ ${assigns.join('\n')}
   return out;
 }
 `;
+}
+
+/** RGBA bytes for showing floats, clear where a pixel is NaN because nothing reached it. */
+export function toBytes(data: Float32Array): Uint8Array {
+  const bytes = new Uint8Array(data.length);
+  for (let p = 0; p < data.length; p += 4) {
+    if (Number.isNaN(data[p])) continue;
+    for (let c = 0; c < 4; c++) bytes[p + c] = Math.round(Math.min(1, Math.max(0, data[p + c]!)) * 255);
+  }
+  return bytes;
+}
+
+/** A pixel of a shown image as the target's format stores it, or nothing where no draw reached. */
+export function shownPixel(shown: { width: number; data: Float32Array | Uint8Array }, x: number, y: number, format: string): number[] {
+  const at = (y * shown.width + x) * 4;
+  if (x >= shown.width || at + 4 > shown.data.length) return [];
+  const values = Array.from(shown.data.subarray(at, at + 4));
+  if (shown.data instanceof Uint8Array) return values.map((v) => v / 255);
+  return values.some(Number.isNaN) ? [] : quantize(format, values);
 }
 
 /** Reads one texel in a target format as floats. */
