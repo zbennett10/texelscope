@@ -10,10 +10,31 @@ export const programShaders = new WeakMap<WebGLProgram, { vertex?: WebGLShader; 
 export interface TextureInfo {
   target: number;
   internalFormat: number;
+  /** The data type of the last upload, which picks the format an unsized one stands for. */
+  type?: number;
   levels: Map<number, [number, number, number]>;
 }
 
 export const textures = new WeakMap<WebGLTexture, TextureInfo>();
+
+/** How deep the hook is in its own WebGL calls, which the patches leave out of what they note. */
+export const own = { depth: 0 };
+
+/** Runs the hook's own WebGL work. */
+export function owned<T>(work: () => T): T {
+  own.depth++;
+  try {
+    return work();
+  } finally {
+    own.depth--;
+  }
+}
+
+/** Textures the app has attached to a framebuffer, whose contents later frames may change. */
+export const renderTargets = new WeakSet<WebGLTexture>();
+
+/** The program and name behind each uniform location the app asked for. */
+export const uniformNames = new WeakMap<WebGLUniformLocation, { program: WebGLProgram; name: string }>();
 
 /** A renderbuffer's internal format and size. */
 export const renderbuffers = new WeakMap<WebGLRenderbuffer, { internalFormat: number; width: number; height: number }>();

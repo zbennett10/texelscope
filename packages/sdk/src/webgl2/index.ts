@@ -1,8 +1,11 @@
 import { animation, useAnimation } from '../animation.js';
 import type { Capture, FragmentInputs } from '../capture.js';
-import { captureDraw } from './capture.js';
+import { markLive } from '../send.js';
+import { captureDraw, WINDOW } from './capture.js';
 import { installPatches } from './install.js';
+import { keepLive } from './live.js';
 import { drawTarget, readRect } from './read.js';
+import { noteDraw } from './scene.js';
 import { type DrawCall, programShaders, shaderSources } from './state.js';
 
 /** Options for {@link installWebGL2}. */
@@ -65,6 +68,15 @@ export function installWebGL2(options: WebGL2InstallOptions = {}): WebGL2Session
   const waiting: { resolve: (capture: Capture) => void; reject: (error: unknown) => void }[] = [];
   let history: History | undefined;
   const release = useAnimation();
+  let draws = 0;
+  const window = options.window ?? WINDOW;
+
+  /** Captures the draw that just ran, keeping what it used so Texelscope can ask for it again. */
+  const capture = (gl: WebGL2RenderingContext, call: DrawCall, extra: { pixel?: [number, number]; label?: string }) => {
+    const { capture, kept } = captureDraw(gl, call, ++draws, { ...extra, frame: animation.count, window });
+    markLive(capture, keepLive(kept, window));
+    return capture;
+  };
 
   const watched = (gl: WebGL2RenderingContext) => {
     if (!options.filter) return true;
@@ -106,6 +118,7 @@ export function installWebGL2(options: WebGL2InstallOptions = {}): WebGL2Session
     },
     afterDraw(gl, call: DrawCall) {
       animation.drew();
+      noteDraw(gl);
       const h = history;
       if (h && gl.canvas === h.canvas) {
         h.draws++;
@@ -118,7 +131,7 @@ export function installWebGL2(options: WebGL2InstallOptions = {}): WebGL2Session
         h.before = undefined;
         if (before && after && before.some((v, i) => !Object.is(v, after[i]))) {
           try {
-            h.captures.push(captureDraw(gl, call, { pixel: [h.x, h.y], label: label(gl, h), frame: animation.count, window: options.window }));
+            h.captures.push(capture(gl, call, { pixel: [h.x, h.y], label: label(gl, h) }));
           } catch (error) {
             h.problems.push((error as Error).message);
           }
@@ -127,7 +140,7 @@ export function installWebGL2(options: WebGL2InstallOptions = {}): WebGL2Session
       if (waiting.length > 0 && watched(gl)) {
         const waiter = waiting.shift()!;
         try {
-          waiter.resolve(captureDraw(gl, call, { frame: animation.count, window: options.window }));
+          waiter.resolve(capture(gl, call, {}));
         } catch (error) {
           waiter.reject(error);
         }

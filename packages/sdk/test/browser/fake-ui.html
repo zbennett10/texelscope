@@ -1,0 +1,13 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8" /><title>Fake UI</title></head>
+  <body>
+    <script>
+      // Stands in for the Texelscope UI: says it listens, keeps what arrives, and asks the page.
+      window.received = [];
+      addEventListener('message', (event) => window.received.push(event.data));
+      window.ask = (message) => window.opener.postMessage(message, location.origin);
+      window.opener.postMessage({ type: 'texelscope:ready' }, location.origin);
+    </script>
+  </body>
+</html>

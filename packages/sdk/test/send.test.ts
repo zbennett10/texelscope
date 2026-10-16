@@ -51,7 +51,7 @@ describe('openInTexelscope', () => {
     const { openInTexelscope } = await import('../src/send.js');
     const { tab, open, posted } = browser({ loaded: false, answers: true });
     await openInTexelscope(capture, { pixel: [3, 4] });
-    expect(open).toHaveBeenCalledWith('', 'texelscope');
+    expect(open).toHaveBeenCalledWith('', 'texelscope', 'popup');
     expect(tab.href).toBe('http://localhost:5173/');
     expect(posted).toEqual([
       { message: { type: 'texelscope:capture', capture, pixel: [3, 4] }, origin: 'http://localhost:5173' },

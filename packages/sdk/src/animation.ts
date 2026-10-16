@@ -22,6 +22,13 @@ export interface Animation {
   drew(): void;
   /** Calls `callback` once the frame that shows what was drawn so far has finished. */
   afterFrame(callback: () => void): void;
+  /** Whether one of the app's frame callbacks is running. */
+  readonly inCallback: boolean;
+  /**
+   * Calls `listener` right after each of the app's frame callbacks, before the browser shows
+   * the frame, while a canvas still holds what was drawn. Returns the undo.
+   */
+  afterCallback(listener: () => void): () => void;
   /** Resolves when the browser next renders. */
   next(): Promise<void>;
   /**
@@ -42,6 +49,8 @@ let current: Frame | undefined;
 let lastDrawing: Frame | undefined;
 /** The app's callbacks waiting for a frame, by id. */
 const waiting = new Set<number>();
+const afterCallbacks = new Set<() => void>();
+let inCallback = false;
 const ends: (() => void)[] = [];
 
 const end = (frame: Frame) => {
@@ -62,7 +71,13 @@ const run = (callback: FrameRequestCallback, time: number) => {
     setTimeout(() => end(frame), 0);
   }
   current.callbacks.push(callback);
-  callback(time);
+  inCallback = true;
+  try {
+    callback(time);
+  } finally {
+    inCallback = false;
+    for (const listener of afterCallbacks) listener();
+  }
 };
 
 const nextFrame = (callback: FrameRequestCallback) => (request ? request(callback) : setTimeout(() => callback(performance.now()), 16));
@@ -77,6 +92,13 @@ export const animation: Animation = {
   drew() {
     draws++;
     if (current) current.drew = true;
+  },
+  get inCallback() {
+    return inCallback;
+  },
+  afterCallback(listener) {
+    afterCallbacks.add(listener);
+    return () => afterCallbacks.delete(listener);
   },
   afterFrame(callback) {
     if (current) ends.push(callback);

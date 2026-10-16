@@ -1,5 +1,5 @@
 import { patcher } from '../webgpu/patch.js';
-import { type DrawCall, programShaders, renderbuffers, shaderSources, textures } from './state.js';
+import { type DrawCall, own, programShaders, renderTargets, renderbuffers, shaderSources, type TextureInfo, textures, uniformNames } from './state.js';
 
 export interface GLHooks {
   /** Called just before each draw call. */
@@ -23,12 +23,13 @@ function bindingFor(gl: WebGL2RenderingContext, target: number): number {
 }
 
 /** Notes a texture level's format and size, against the texture bound for the upload. */
-function noteLevel(gl: WebGL2RenderingContext, target: number, level: number, internalFormat: number, size: [number, number, number]) {
+function noteLevel(gl: WebGL2RenderingContext, target: number, level: number, internalFormat: number, size: [number, number, number], type?: number) {
   const texture = gl.getParameter(bindingFor(gl, target)) as WebGLTexture | null;
   if (!texture) return;
-  const info = textures.get(texture) ?? { target, internalFormat, levels: new Map() };
+  const info: TextureInfo = textures.get(texture) ?? { target, internalFormat, levels: new Map() };
   info.internalFormat = internalFormat;
   info.target = target;
+  info.type = type;
   info.levels.set(level, size);
   textures.set(texture, info);
 }
@@ -60,8 +61,9 @@ export function installPatches(hooks: GLHooks): () => void {
   patch(proto, 'texImage2D', (original) => function (this: WebGL2RenderingContext, ...args: unknown[]) {
     const [target, level, internalFormat] = args as number[];
     // Nine or more arguments give a width and height, six take them from an image.
-    const size: [number, number] = args.length >= 8 ? [args[3] as number, args[4] as number] : sourceSize(args[5]);
-    noteLevel(this, target!, level!, internalFormat!, [size[0], size[1], 1]);
+    const sized = args.length >= 8;
+    const size: [number, number] = sized ? [args[3] as number, args[4] as number] : sourceSize(args[5]);
+    noteLevel(this, target!, level!, internalFormat!, [size[0], size[1], 1], (sized ? args[7] : args[4]) as number);
     return (original as (...a: unknown[]) => void).apply(this, args);
   } as typeof proto.texImage2D);
 
@@ -74,7 +76,7 @@ export function installPatches(hooks: GLHooks): () => void {
 
   patch(proto, 'texImage3D', (original) => function (this: WebGL2RenderingContext, ...args: unknown[]) {
     const [target, level, internalFormat, width, height, depth] = args as number[];
-    noteLevel(this, target!, level!, internalFormat!, [width!, height!, depth!]);
+    noteLevel(this, target!, level!, internalFormat!, [width!, height!, depth!], args[8] as number);
     return (original as (...a: unknown[]) => void).apply(this, args);
   } as typeof proto.texImage3D);
 
@@ -83,6 +85,22 @@ export function installPatches(hooks: GLHooks): () => void {
       noteLevel(this, target, level, internalFormat, [Math.max(1, width >> level), Math.max(1, height >> level), depth]);
     }
     return original.call(this, target, levels, internalFormat, width, height, depth);
+  });
+
+  patch(proto, 'framebufferTexture2D', (original) => function (this: WebGL2RenderingContext, target: number, attachment: number, textarget: number, texture: WebGLTexture | null, level: number) {
+    if (texture && own.depth === 0) renderTargets.add(texture);
+    return original.call(this, target, attachment, textarget, texture, level);
+  });
+
+  patch(proto, 'framebufferTextureLayer', (original) => function (this: WebGL2RenderingContext, target: number, attachment: number, texture: WebGLTexture | null, level: number, layer: number) {
+    if (texture && own.depth === 0) renderTargets.add(texture);
+    return original.call(this, target, attachment, texture, level, layer);
+  });
+
+  patch(proto, 'getUniformLocation', (original) => function (this: WebGL2RenderingContext, program: WebGLProgram, name: string) {
+    const location = original.call(this, program, name);
+    if (location) uniformNames.set(location, { program, name });
+    return location;
   });
 
   patch(proto, 'renderbufferStorage', (original) => function (this: WebGL2RenderingContext, target: number, internalFormat: number, width: number, height: number) {

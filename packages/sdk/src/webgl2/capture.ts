@@ -3,8 +3,10 @@
 import type { Binding, Capture, Rect } from '../capture.js';
 import { toBase64 } from '../encode.js';
 import { windowInputs } from './inputs.js';
+import { keepDraw, type KeptDraw, releaseDraw } from './keep.js';
+import { samplerTarget } from './program.js';
 import { type DrawTarget, drawTarget, readTexture, samplerState, targetBytes } from './read.js';
-import { type DrawCall, programShaders, shaderSources } from './state.js';
+import { type DrawCall, owned, programShaders, shaderSources } from './state.js';
 
 /** How many pixels on a side the window of recorded inputs covers. */
 export const WINDOW = 128;
@@ -17,8 +19,11 @@ export interface DrawCaptureOptions {
   frame?: number;
 }
 
-/** Captures the draw that just ran on `gl`. Leaves every piece of WebGL state as it was. */
-export function captureDraw(gl: WebGL2RenderingContext, call: DrawCall, options: DrawCaptureOptions = {}): Capture {
+/**
+ * Captures the draw that just ran on `gl`, and keeps what it used under `id` so it can be
+ * drawn again. Leaves every piece of WebGL state as it was.
+ */
+export function captureDraw(gl: WebGL2RenderingContext, call: DrawCall, id: number, options: DrawCaptureOptions = {}): { capture: Capture; kept: KeptDraw } {
   const program = gl.getParameter(gl.CURRENT_PROGRAM) as WebGLProgram | null;
   if (!program) throw new Error('no program was bound for the draw');
   const fragment = programShaders.get(program)?.fragment;
@@ -26,24 +31,31 @@ export function captureDraw(gl: WebGL2RenderingContext, call: DrawCall, options:
   if (!source) throw new Error('the program was made before Texelscope was installed, so its source is unknown');
   const target = drawTarget(gl);
   if (!target.readable || target.width === 0) throw new Error("the draw's target can't be read back");
-  const rect = windowAround(target, options.pixel, options.window ?? WINDOW);
-  const bindings = [...uniforms(gl, program), ...blocks(gl, program), ...samplers(gl, program)];
-  const inputs = windowInputs(gl, program, call, source, target, rect);
-  if (typeof inputs === 'string') throw new Error(inputs);
-  return {
-    version: 0,
-    label: options.label,
-    frame: options.frame,
-    shader: { language: 'glsl', source: { inline: source }, entryPoint: 'main' },
-    target: { width: target.width, height: target.height, format: target.float ? 'rgba32float' : 'rgba8unorm', yUp: true },
-    inputs,
-    bindings,
-    reference: { rect: { x: 0, y: 0, width: target.width, height: target.height }, rgba8: toBase64(targetBytes(gl, target)) },
-  };
+  const kept = keepDraw(gl, call, id, target.width, target.height);
+  if (typeof kept === 'string') throw new Error(kept);
+  try {
+    const inputs = windowInputs(kept, windowAround(target, options.pixel, options.window ?? WINDOW));
+    if (typeof inputs === 'string') throw new Error(inputs);
+    const bindings = owned(() => [...uniforms(gl, program), ...blocks(gl, program), ...samplers(gl, program)]);
+    const capture: Capture = {
+      version: 0,
+      label: options.label,
+      frame: options.frame,
+      shader: { language: 'glsl', source: { inline: source }, entryPoint: 'main' },
+      target: { width: target.width, height: target.height, format: target.float ? 'rgba32float' : 'rgba8unorm', yUp: true },
+      inputs,
+      bindings,
+      reference: { rect: { x: 0, y: 0, width: target.width, height: target.height }, rgba8: toBase64(owned(() => targetBytes(gl, target))) },
+    };
+    return { capture, kept };
+  } catch (error) {
+    releaseDraw(kept);
+    throw error;
+  }
 }
 
 /** A window of up to `size` pixels on a side around a pixel, inside the target. */
-function windowAround(target: DrawTarget, pixel: [number, number] | undefined, size: number): Rect {
+export function windowAround(target: Pick<DrawTarget, 'width' | 'height'>, pixel: [number, number] | undefined, size: number): Rect {
   const [px, py] = pixel ?? [Math.floor(target.width / 2), Math.floor(target.height / 2)];
   const width = Math.min(size, target.width);
   const height = Math.min(size, target.height);
@@ -72,33 +84,6 @@ function activeUniforms(gl: WebGL2RenderingContext, program: WebGLProgram): Acti
 
 function isSampler(gl: WebGL2RenderingContext, type: number): boolean {
   return samplerTarget(gl, type) !== undefined;
-}
-
-/** The texture target and binding query for each sampler type. */
-function samplerTarget(gl: WebGL2RenderingContext, type: number): [number, number] | undefined {
-  switch (type) {
-    case gl.SAMPLER_2D:
-    case gl.INT_SAMPLER_2D:
-    case gl.UNSIGNED_INT_SAMPLER_2D:
-    case gl.SAMPLER_2D_SHADOW:
-      return [gl.TEXTURE_2D, gl.TEXTURE_BINDING_2D];
-    case gl.SAMPLER_3D:
-    case gl.INT_SAMPLER_3D:
-    case gl.UNSIGNED_INT_SAMPLER_3D:
-      return [gl.TEXTURE_3D, gl.TEXTURE_BINDING_3D];
-    case gl.SAMPLER_CUBE:
-    case gl.INT_SAMPLER_CUBE:
-    case gl.UNSIGNED_INT_SAMPLER_CUBE:
-    case gl.SAMPLER_CUBE_SHADOW:
-      return [gl.TEXTURE_CUBE_MAP, gl.TEXTURE_BINDING_CUBE_MAP];
-    case gl.SAMPLER_2D_ARRAY:
-    case gl.INT_SAMPLER_2D_ARRAY:
-    case gl.UNSIGNED_INT_SAMPLER_2D_ARRAY:
-    case gl.SAMPLER_2D_ARRAY_SHADOW:
-      return [gl.TEXTURE_2D_ARRAY, gl.TEXTURE_BINDING_2D_ARRAY];
-    default:
-      return undefined;
-  }
 }
 
 /** A typed array from getUniform as plain numbers and booleans. */

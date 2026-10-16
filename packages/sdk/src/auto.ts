@@ -32,7 +32,7 @@ export function startAuto(options: AutoOptions = {}): void {
   const gl: WebGL2Session | undefined = typeof WebGL2RenderingContext !== 'undefined' ? installWebGL2({ window: options.window }) : undefined;
   const gpu: WebGPUSession | undefined = typeof GPUDevice !== 'undefined' ? installWebGPU() : undefined;
 
-  // The capture comes first: opening Texelscope's tab would hide this one, and hidden tabs don't draw.
+  // The capture comes first: Texelscope's window may cover this one, and a hidden page doesn't draw.
   const pick = async (canvas: HTMLCanvasElement, kind: 'webgl2' | 'webgpu', x: number, y: number) => {
     toast(`Capturing the draw behind pixel ${x}, ${y}...`);
     try {
@@ -65,9 +65,9 @@ export function startAuto(options: AutoOptions = {}): void {
     toast(`Waiting for the app to draw pixel ${x}, ${y}. It draws only when something changes, so change something, like moving the view a little.`);
   };
 
-  /** Sends the captures, with the last one, which left the pixel as it is, opening in the tab. */
+  /** Sends the captures, with the last one, which left the pixel as it is, opening in the window. */
   const send = async (captures: Capture[], x: number, y: number) => {
-    // A page may only open a tab shortly after a click, so a slow capture asks for another.
+    // A page may only open a window shortly after a click, so a slow capture asks for another.
     if (!isTexelscopeOpen() && navigator.userActivation?.isActive === false) {
       toast(`Captured pixel ${x}, ${y}.`, { action: { label: 'Open in Texelscope', run: () => void send(captures, x, y).catch((error: Error) => toast(error.message, { problem: true })) } });
       return;
